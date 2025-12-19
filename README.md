@@ -1,5 +1,10 @@
 # mssql-pg-migrate
 
+[![CI](https://github.com/johndauphine/mssql-pg-migrate/actions/workflows/ci.yml/badge.svg)](https://github.com/johndauphine/mssql-pg-migrate/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/johndauphine/mssql-pg-migrate)](https://github.com/johndauphine/mssql-pg-migrate/releases/latest)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/johndauphine/mssql-pg-migrate)](https://go.dev/)
+[![License](https://img.shields.io/github/license/johndauphine/mssql-pg-migrate)](LICENSE)
+
 High-performance CLI tool for migrating data from Microsoft SQL Server to PostgreSQL.
 
 ## Performance
