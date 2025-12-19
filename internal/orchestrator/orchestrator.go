@@ -505,10 +505,14 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 
 		// Get sample PKs from source
 		pkCol := t.PrimaryKey[0]
+		tableHint := "WITH (NOLOCK)"
+		if o.config.Migration.StrictConsistency {
+			tableHint = ""
+		}
 		sampleQuery := fmt.Sprintf(`
-			SELECT TOP %d [%s] FROM [%s].[%s] WITH (NOLOCK)
+			SELECT TOP %d [%s] FROM [%s].[%s] %s
 			ORDER BY NEWID()
-		`, sampleSize, pkCol, t.Schema, t.Name)
+		`, sampleSize, pkCol, t.Schema, t.Name, tableHint)
 
 		rows, err := o.sourcePool.DB().QueryContext(ctx, sampleQuery)
 		if err != nil {

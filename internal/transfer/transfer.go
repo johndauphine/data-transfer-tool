@@ -249,17 +249,18 @@ func executeRowNumberPagination(
 	stats := &TransferStats{}
 	colList := "[" + strings.Join(cols, "], [") + "]"
 
-	// Build ORDER BY clause from PK columns (or all columns if no PK)
-	var orderBy string
-	if len(job.Table.PrimaryKey) > 0 {
-		pkCols := make([]string, len(job.Table.PrimaryKey))
-		for i, pk := range job.Table.PrimaryKey {
-			pkCols[i] = fmt.Sprintf("[%s]", pk)
-		}
-		orderBy = strings.Join(pkCols, ", ")
-	} else {
-		orderBy = "(SELECT NULL)" // No deterministic order for tables without PK
+	// Build ORDER BY clause from PK columns
+	// Tables without PK cannot be migrated safely - fail fast
+	if len(job.Table.PrimaryKey) == 0 {
+		return nil, fmt.Errorf("table %s has no primary key - cannot guarantee data correctness with ROW_NUMBER pagination. "+
+			"Add a primary key to the table or exclude it from migration", job.Table.FullName())
 	}
+
+	pkCols := make([]string, len(job.Table.PrimaryKey))
+	for i, pk := range job.Table.PrimaryKey {
+		pkCols[i] = fmt.Sprintf("[%s]", pk)
+	}
+	orderBy := strings.Join(pkCols, ", ")
 
 	// Use NOLOCK unless strict consistency is enabled
 	tableHint := "WITH (NOLOCK)"
