@@ -52,14 +52,15 @@ func Execute(
 	job Job,
 	prog *progress.Tracker,
 ) (*TransferStats, error) {
-	// Truncate target on first partition or non-partitioned
-	if job.Partition == nil || job.Partition.PartitionID == 1 {
+	// Handle truncation based on job type
+	if job.Partition == nil {
+		// Non-partitioned table: truncate here (no race possible)
 		if err := tgtPool.TruncateTable(ctx, cfg.Target.Schema, job.Table.Name); err != nil {
 			// Ignore truncate errors (table might not exist)
 		}
 	} else {
-		// For subsequent partitions, clean up any existing data in PK range (idempotent retry)
-		if job.Partition != nil && job.Table.SupportsKeysetPagination() {
+		// Partitioned table: already truncated in orchestrator, just cleanup for idempotent retry
+		if job.Table.SupportsKeysetPagination() {
 			if err := cleanupPartitionData(ctx, tgtPool.Pool(), cfg.Target.Schema, &job); err != nil {
 				fmt.Printf("Warning: cleanup partition data for %s: %v\n", job.Table.Name, err)
 			}

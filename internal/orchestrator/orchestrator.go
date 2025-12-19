@@ -387,6 +387,18 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		statsMap[t.Name] = &tableStats{stats: &transfer.TransferStats{}}
 	}
 
+	// Pre-truncate partitioned tables BEFORE dispatching jobs (prevents race condition)
+	// Non-partitioned tables will be truncated inside transfer.Execute as before
+	truncatedTables := make(map[string]bool)
+	for _, j := range jobs {
+		if j.Partition != nil && !truncatedTables[j.Table.Name] {
+			if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, j.Table.Name); err != nil {
+				return fmt.Errorf("pre-truncating table %s: %w", j.Table.Name, err)
+			}
+			truncatedTables[j.Table.Name] = true
+		}
+	}
+
 	// Execute jobs with worker pool
 	sem := make(chan struct{}, o.config.Migration.Workers)
 	var wg sync.WaitGroup
@@ -595,16 +607,23 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 			continue
 		}
 
-		// Get sample PKs from source
-		pkCol := t.PrimaryKey[0]
+		// Build PK column list for SELECT (supports composite PKs)
+		pkCols := make([]string, len(t.PrimaryKey))
+		for i, col := range t.PrimaryKey {
+			pkCols[i] = fmt.Sprintf("[%s]", col)
+		}
+		pkColList := strings.Join(pkCols, ", ")
+
 		tableHint := "WITH (NOLOCK)"
 		if o.config.Migration.StrictConsistency {
 			tableHint = ""
 		}
+
+		// Sample random rows with all PK columns
 		sampleQuery := fmt.Sprintf(`
-			SELECT TOP %d [%s] FROM [%s].[%s] %s
+			SELECT TOP %d %s FROM [%s].[%s] %s
 			ORDER BY NEWID()
-		`, sampleSize, pkCol, t.Schema, t.Name, tableHint)
+		`, sampleSize, pkColList, t.Schema, t.Name, tableHint)
 
 		rows, err := o.sourcePool.DB().QueryContext(ctx, sampleQuery)
 		if err != nil {
@@ -612,40 +631,54 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 			continue
 		}
 
-		var pks []any
+		// Collect sample PK tuples (each is a slice of values)
+		var pkTuples [][]any
 		for rows.Next() {
-			var pk any
-			if err := rows.Scan(&pk); err != nil {
-				rows.Close()
+			// Create slice to hold all PK column values
+			pkValues := make([]any, len(t.PrimaryKey))
+			pkPtrs := make([]any, len(t.PrimaryKey))
+			for i := range pkValues {
+				pkPtrs[i] = &pkValues[i]
+			}
+
+			if err := rows.Scan(pkPtrs...); err != nil {
 				continue
 			}
-			pks = append(pks, pk)
+			pkTuples = append(pkTuples, pkValues)
 		}
 		rows.Close()
 
-		if len(pks) == 0 {
+		if len(pkTuples) == 0 {
 			fmt.Printf("%-30s SKIP (no rows)\n", t.Name)
 			continue
 		}
 
-		// Check if these PKs exist in target
+		// Check if these PK tuples exist in target
 		missingCount := 0
-		for _, pk := range pks {
-			var exists bool
+		for _, pkTuple := range pkTuples {
+			// Build WHERE clause: col1 = $1 AND col2 = $2 AND ...
+			whereClauses := make([]string, len(t.PrimaryKey))
+			for i, col := range t.PrimaryKey {
+				whereClauses[i] = fmt.Sprintf("%q = $%d", col, i+1)
+			}
+			whereClause := strings.Join(whereClauses, " AND ")
+
 			checkQuery := fmt.Sprintf(
-				`SELECT EXISTS(SELECT 1 FROM %s.%q WHERE %q = $1)`,
-				o.config.Target.Schema, t.Name, pkCol,
+				`SELECT EXISTS(SELECT 1 FROM %s.%q WHERE %s)`,
+				o.config.Target.Schema, t.Name, whereClause,
 			)
-			err := o.targetPool.Pool().QueryRow(ctx, checkQuery, pk).Scan(&exists)
+
+			var exists bool
+			err := o.targetPool.Pool().QueryRow(ctx, checkQuery, pkTuple...).Scan(&exists)
 			if err != nil || !exists {
 				missingCount++
 			}
 		}
 
 		if missingCount == 0 {
-			fmt.Printf("%-30s OK (%d samples)\n", t.Name, len(pks))
+			fmt.Printf("%-30s OK (%d samples)\n", t.Name, len(pkTuples))
 		} else {
-			fmt.Printf("%-30s FAIL (%d/%d missing)\n", t.Name, missingCount, len(pks))
+			fmt.Printf("%-30s FAIL (%d/%d missing)\n", t.Name, missingCount, len(pkTuples))
 			failed = true
 		}
 	}

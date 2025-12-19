@@ -146,7 +146,7 @@ The project follows a clean, modular architecture:
 - Applied in both `Run()` and `Resume()`
 
 ### 11. Partitioned Transfers Can Truncate In-Flight Partitions
-**Status**: 🔴 CONFIRMED (P1 - Data Loss Risk)
+**Status**: ✅ Fixed (Dec 19, 2024)
 
 **Observation**: Partitioned jobs run concurrently and job `partition_id == 1` truncates the whole target table at the start (`internal/transfer/transfer.go:55-67`). There is no per-table sequencing in the worker pool (`internal/orchestrator/orchestrator.go:332-434`), so if partition 2 (or N) starts writing before partition 1 starts, partition 1 will later `TRUNCATE` and wipe rows already inserted by other partitions.
 **Impact**: Silent data loss or duplicated work for any table split into partitions with worker count > 1.
@@ -203,7 +203,7 @@ for _, j := range jobs {
 ```
 
 ### 12. Sample Validation Ignores Composite Primary Keys
-**Status**: ⚠️ CONFIRMED (P3 - Coverage Gap)
+**Status**: ✅ Fixed (Dec 19, 2024)
 
 **Observation**: `validateSamples` only pulls/compares the first PK column (`internal/orchestrator/orchestrator.go:598-639`), even when a table has a composite PK.
 **Impact**: Composite-PK tables can report false positives/negatives; missing rows may go undetected because only part of the key is compared.
@@ -250,8 +250,8 @@ The codebase is high-quality and performance-focused, but the open P1 (partition
 | 8 | Run Status Not Finalized | ✅ Fixed | - |
 | 9 | Keyset PK Column | ⚠️ Not a Bug | - |
 | 10 | exclude_tables Ignored | ✅ Fixed | - |
-| 11 | Partitioned Truncate Race | 🔴 **CONFIRMED** | **P1** |
-| 12 | Sample Validation Composite PKs | ⚠️ Confirmed | P3 |
+| 11 | Partitioned Truncate Race | ✅ Fixed | - |
+| 12 | Sample Validation Composite PKs | ✅ Fixed | - |
 
 ### Fixes Implemented (Dec 19, 2024)
 
@@ -271,6 +271,17 @@ The codebase is high-quality and performance-focused, but the open P1 (partition
 - Case-insensitive matching
 - Logs which tables were skipped
 
+**#11 - Partitioned Truncate Race Fixed**
+- Pre-truncate partitioned tables in orchestrator BEFORE dispatching partition jobs
+- Non-partitioned tables still truncated inside transfer.Execute (no race possible)
+- Cleanup function still runs for idempotent retry behavior
+- Safe with any Workers count and partition configuration
+
+**#12 - Sample Validation Composite PK Support**
+- Samples all PK columns (not just the first)
+- Builds WHERE clause with all PK columns: `col1 = $1 AND col2 = $2 AND ...`
+- Works for single and composite PKs with the same code path
+
 ### Additional Fixes (from GO_MIGRATOR_CORRECTNESS_NOTES.md)
 
 - ✅ **Fail-fast for tables without PK** - Prevents silent data corruption
@@ -278,13 +289,13 @@ The codebase is high-quality and performance-focused, but the open P1 (partition
 
 ### Overall Assessment
 
-**Production Ready**: ⚠️ **CONDITIONAL** - Safe with `Workers: 1` or small tables
+**Production Ready**: ✅ **YES** - All critical issues fixed
 
 | Configuration | Safe? | Notes |
 |---------------|-------|-------|
-| `Workers: 1` | ✅ Yes | No parallelism, but no race condition |
-| Small tables (< threshold) | ✅ Yes | No partitioning = no race |
-| `Workers: 2+` with large tables | 🔴 **NO** | Race condition can cause data loss |
+| `Workers: 1` | ✅ Yes | Single-threaded, no concurrency issues |
+| `Workers: 2+` with large tables | ✅ Yes | Pre-truncate prevents race condition |
+| Composite PK tables | ✅ Yes | Sample validation uses all PK columns |
 
 **What Works Well**:
 - Core data transfer path is performant (tested with 106M rows in SO2013)
@@ -293,13 +304,15 @@ The codebase is high-quality and performance-focused, but the open P1 (partition
 - All error paths properly finalize run status
 - Keyset pagination is correct and efficient
 - Type conversions handle all common SQL Server types
+- Partitioned transfers are race-free (pre-truncate in orchestrator)
+- Sample validation works with composite PKs
 
-**Critical Issue**:
-Finding #11 (Partitioned Truncate Race) **MUST be fixed** before using with:
-- `Workers > 1` AND
-- Large tables that trigger partitioning
-
-**Recommended Fix**: ~10 lines of code - pre-truncate tables in orchestrator before dispatching partition jobs.
+**All P1/P2 Issues Resolved**:
+- #7: Resume now reuses run ID and skips completed tables
+- #8: Run status finalized on all error paths
+- #10: Table filtering with include/exclude patterns
+- #11: Pre-truncate eliminates partition race condition
+- #12: Sample validation supports composite PKs
 
 ---
 
