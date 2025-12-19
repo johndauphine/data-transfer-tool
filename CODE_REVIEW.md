@@ -2,6 +2,7 @@
 
 *Original review by Codex - Dec 2024*
 *Status updates and Claude assessment - Dec 19, 2024*
+*Full codebase review by Claude Code - Dec 19, 2024*
 
 ## Overview
 
@@ -144,9 +145,94 @@ The project follows a clean, modular architecture:
 - Logs skipped tables: `Skipped N tables by filter: [table1, table2, ...]`
 - Applied in both `Run()` and `Resume()`
 
+### 11. Partitioned Transfers Can Truncate In-Flight Partitions
+**Status**: 🔴 CONFIRMED (P1 - Data Loss Risk)
+
+**Observation**: Partitioned jobs run concurrently and job `partition_id == 1` truncates the whole target table at the start (`internal/transfer/transfer.go:55-67`). There is no per-table sequencing in the worker pool (`internal/orchestrator/orchestrator.go:332-434`), so if partition 2 (or N) starts writing before partition 1 starts, partition 1 will later `TRUNCATE` and wipe rows already inserted by other partitions.
+**Impact**: Silent data loss or duplicated work for any table split into partitions with worker count > 1.
+**Recommendation**: Pre-truncate once per table before launching partition jobs (e.g., orchestrator-side) and/or serialize partitions per table (per-table semaphore or `sync.Once` + cleanup). Avoid letting a truncate run after any partition has started writing.
+
+**[Claude Code Review - Dec 19, 2024]**: CONFIRMED as a real race condition.
+
+**Race Condition Analysis**:
+
+```
+Code flow in orchestrator.go:395-407:
+  for _, job := range jobs {        // Jobs submitted sequentially
+      sem <- struct{}{}             // Semaphore limits concurrency
+      go func(j transfer.Job) {     // Goroutine starts immediately
+          transfer.Execute(...)     // Races with other goroutines
+      }
+  }
+```
+
+The race manifests when `Workers > 1`:
+
+1. Jobs are submitted in order: Partition 1, Partition 2, Partition 3...
+2. Goroutines start nearly simultaneously (semaphore only limits count, not order)
+3. **If Partition 2's goroutine executes `transfer.Execute()` first**:
+   - Skips TRUNCATE (PartitionID != 1)
+   - Calls `cleanupPartitionData()` (does nothing - table is empty)
+   - Begins inserting rows
+4. **Partition 1's goroutine starts later**:
+   - Calls `TRUNCATE TABLE` (PartitionID == 1)
+   - **Wipes all data including Partition 2's rows**
+5. Result: Data loss for Partition 2 (and any other partitions that started early)
+
+**Probability Factors**:
+- Higher with more workers (Workers=4+ makes this likely)
+- Higher with more partitions per table
+- Can occur even with Workers=2 if partition 1's goroutine is delayed
+
+**Workarounds**:
+- Set `Workers: 1` (eliminates parallelism, defeats purpose)
+- Use small `large_table_threshold` to avoid partitioning
+
+**Recommended Fix**: Pre-truncate in orchestrator before dispatching partition jobs:
+
+```go
+// In transferAll(), before job dispatch:
+truncatedTables := make(map[string]bool)
+for _, j := range jobs {
+    if j.Partition != nil && !truncatedTables[j.Table.Name] {
+        tgtPool.TruncateTable(ctx, targetSchema, j.Table.Name)
+        truncatedTables[j.Table.Name] = true
+    }
+}
+// Then dispatch jobs (remove truncate from transfer.Execute)
+```
+
+### 12. Sample Validation Ignores Composite Primary Keys
+**Status**: ⚠️ CONFIRMED (P3 - Coverage Gap)
+
+**Observation**: `validateSamples` only pulls/compares the first PK column (`internal/orchestrator/orchestrator.go:598-639`), even when a table has a composite PK.
+**Impact**: Composite-PK tables can report false positives/negatives; missing rows may go undetected because only part of the key is compared.
+**Recommendation**: Build sampling and existence checks over all PK columns, or explicitly skip composite-PK tables with a clear warning so users know validation did not run.
+
+**[Claude Code Review - Dec 19, 2024]**: Confirmed. Line 599: `pkCol := t.PrimaryKey[0]` only uses first PK column.
+
+For composite PKs (e.g., `(TenantID, OrderID)`), sample validation:
+- Samples only `TenantID` values from source
+- Checks if those `TenantID` values exist in target (ignoring `OrderID`)
+- May report false positives (row exists with same TenantID but different OrderID)
+- May miss actual data corruption
+
+**Severity**: P3 (low) because:
+- Row count validation still works for detecting gross data loss
+- Sample validation is optional (`sample_validation: false` to disable)
+- Most tables have single-column PKs
+
+**Recommended Fix**: Skip composite-PK tables with a warning:
+```go
+if len(t.PrimaryKey) > 1 {
+    fmt.Printf("%-30s SKIP (composite PK)\n", t.Name)
+    continue
+}
+```
+
 ## Conclusion
 
-The codebase is high-quality, well-structured, and addresses the critical performance aspects of database migration. The recommendations above are primarily optimizations for robustness and edge-case handling.
+The codebase is high-quality and performance-focused, but the open P1 (partitioned transfer truncate race) must be fixed before considering production use. The remaining items are robustness/coverage improvements.
 
 ---
 
@@ -154,16 +240,18 @@ The codebase is high-quality, well-structured, and addresses the critical perfor
 
 | # | Finding | Status | Priority |
 |---|---------|--------|----------|
-| 1 | Resume Logic Granularity | ⚠️ Table-level (not chunk) | P2 |
-| 2 | Type Conversion & Safety | ⚠️ Acceptable | P2 |
+| 1 | Resume Logic Granularity | ⚠️ Table-level (not chunk) | P3 |
+| 2 | Type Conversion & Safety | ⚠️ Acceptable | P3 |
 | 3 | UUID Handling | ⚠️ Acceptable | P3 |
-| 4 | Check Constraint Conversion | ⚠️ Known Limitation | P2 |
+| 4 | Check Constraint Conversion | ⚠️ Known Limitation | P3 |
 | 5 | Error Handling in Orchestrator | ⚠️ By Design | P3 |
 | 6 | CSV Parsing | ⚠️ Acceptable Risk | P3 |
-| 7 | Resume Starts Fresh Run | ✅ Fixed | P1 |
-| 8 | Run Status Not Finalized | ✅ Fixed | P2 |
+| 7 | Resume Starts Fresh Run | ✅ Fixed | - |
+| 8 | Run Status Not Finalized | ✅ Fixed | - |
 | 9 | Keyset PK Column | ⚠️ Not a Bug | - |
-| 10 | exclude_tables Ignored | ✅ Fixed | P2 |
+| 10 | exclude_tables Ignored | ✅ Fixed | - |
+| 11 | Partitioned Truncate Race | 🔴 **CONFIRMED** | **P1** |
+| 12 | Sample Validation Composite PKs | ⚠️ Confirmed | P3 |
 
 ### Fixes Implemented (Dec 19, 2024)
 
@@ -190,10 +278,29 @@ The codebase is high-quality, well-structured, and addresses the critical perfor
 
 ### Overall Assessment
 
-**Production Ready**: Yes
-- Core data transfer is correct and performant (tested with 106M rows)
-- Resume works at table level (skips completed tables)
-- Table filtering works (include/exclude patterns)
-- All error paths properly finalize run status
+**Production Ready**: ⚠️ **CONDITIONAL** - Safe with `Workers: 1` or small tables
 
-The tool successfully migrates large databases with high throughput. Remaining items are acceptable limitations, not bugs.
+| Configuration | Safe? | Notes |
+|---------------|-------|-------|
+| `Workers: 1` | ✅ Yes | No parallelism, but no race condition |
+| Small tables (< threshold) | ✅ Yes | No partitioning = no race |
+| `Workers: 2+` with large tables | 🔴 **NO** | Race condition can cause data loss |
+
+**What Works Well**:
+- Core data transfer path is performant (tested with 106M rows in SO2013)
+- Resume works at table level (skips completed tables, verified by row count)
+- Table filtering works (include/exclude glob patterns)
+- All error paths properly finalize run status
+- Keyset pagination is correct and efficient
+- Type conversions handle all common SQL Server types
+
+**Critical Issue**:
+Finding #11 (Partitioned Truncate Race) **MUST be fixed** before using with:
+- `Workers > 1` AND
+- Large tables that trigger partitioning
+
+**Recommended Fix**: ~10 lines of code - pre-truncate tables in orchestrator before dispatching partition jobs.
+
+---
+
+*Last reviewed: Dec 19, 2024 by Claude Code*
