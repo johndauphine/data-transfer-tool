@@ -5,9 +5,11 @@ High-performance CLI tool for migrating data from Microsoft SQL Server to Postgr
 ## Features
 
 - **Fast transfers** using PostgreSQL COPY protocol
+- **Parallel partitioning** - Large tables split via NTILE for concurrent transfer
 - **Chunked reads** to handle large tables without memory issues
 - **Resume capability** via SQLite state database
 - **Row count validation** after transfer
+- **Slack notifications** - Get notified on start, completion, and failures
 - **Progress bar** with real-time throughput stats
 - **YAML configuration** with environment variable support
 - **Single binary** - no runtime dependencies
@@ -77,6 +79,13 @@ migration:
     - __*                  # Glob patterns
     - temp_*
   data_dir: ~/.mssql-pg-migrate
+
+# Slack notifications (optional)
+slack:
+  enabled: true
+  webhook_url: ${SLACK_WEBHOOK_URL}
+  channel: "#data-engineering"
+  username: mssql-pg-migrate
 ```
 
 ## Usage
@@ -147,8 +156,9 @@ State is persisted to SQLite (`~/.mssql-pg-migrate/migrate.db`) enabling resume 
 
 ## Roadmap
 
-- [ ] NTILE partitioning for large tables
-- [ ] Parallel partition transfers
+- [x] NTILE partitioning for large tables
+- [x] Parallel partition transfers
+- [x] Slack notifications
 - [ ] Keyset pagination (vs OFFSET)
 - [ ] Unlogged tables during transfer
 - [ ] Connection pooling for MSSQL

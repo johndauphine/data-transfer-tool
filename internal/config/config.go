@@ -13,6 +13,15 @@ type Config struct {
 	Source    SourceConfig    `yaml:"source"`
 	Target    TargetConfig    `yaml:"target"`
 	Migration MigrationConfig `yaml:"migration"`
+	Slack     SlackConfig     `yaml:"slack"`
+}
+
+// SlackConfig holds Slack notification settings
+type SlackConfig struct {
+	WebhookURL string `yaml:"webhook_url"`
+	Channel    string `yaml:"channel"`
+	Username   string `yaml:"username"`
+	Enabled    bool   `yaml:"enabled"`
 }
 
 // SourceConfig holds MSSQL connection settings

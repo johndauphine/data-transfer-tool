@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/notify"
 	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
 	"github.com/johndauphine/mssql-pg-migrate/internal/target"
@@ -44,6 +45,7 @@ type Orchestrator struct {
 	targetPool *target.Pool
 	state      *checkpoint.State
 	progress   *progress.Tracker
+	notifier   *notify.Notifier
 	tables     []source.Table
 }
 
@@ -70,12 +72,16 @@ func New(cfg *config.Config) (*Orchestrator, error) {
 		return nil, fmt.Errorf("creating state manager: %w", err)
 	}
 
+	// Create notifier
+	notifier := notify.New(&cfg.Slack)
+
 	return &Orchestrator{
 		config:     cfg,
 		sourcePool: sourcePool,
 		targetPool: targetPool,
 		state:      state,
 		progress:   progress.New(),
+		notifier:   notifier,
 	}, nil
 }
 
@@ -89,6 +95,7 @@ func (o *Orchestrator) Close() {
 // Run executes a new migration
 func (o *Orchestrator) Run(ctx context.Context) error {
 	runID := uuid.New().String()[:8]
+	startTime := time.Now()
 	fmt.Printf("Starting migration run: %s\n", runID)
 
 	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config); err != nil {
@@ -99,19 +106,25 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	fmt.Println("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
+		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("extracting schema: %w", err)
 	}
 	o.tables = tables
 	fmt.Printf("Found %d tables\n", len(tables))
 
+	// Send start notification
+	o.notifier.MigrationStarted(runID, o.config.Source.Database, o.config.Target.Database, len(tables))
+
 	// Create target schema and tables
 	fmt.Println("Creating target tables...")
 	if err := o.targetPool.CreateSchema(ctx, o.config.Target.Schema); err != nil {
+		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("creating schema: %w", err)
 	}
 
 	for _, t := range tables {
 		if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
+			o.notifyFailure(runID, err, time.Since(startTime))
 			return fmt.Errorf("creating table %s: %w", t.FullName(), err)
 		}
 	}
@@ -120,12 +133,14 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	fmt.Println("Transferring data...")
 	if err := o.transferAll(ctx, runID, tables); err != nil {
 		o.state.CompleteRun(runID, "failed")
+		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("transferring data: %w", err)
 	}
 
 	// Finalize
 	fmt.Println("Finalizing...")
 	if err := o.finalize(ctx, tables); err != nil {
+		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
 	}
 
@@ -133,13 +148,28 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	fmt.Println("Validating...")
 	if err := o.Validate(ctx); err != nil {
 		o.state.CompleteRun(runID, "failed")
+		o.notifyFailure(runID, err, time.Since(startTime))
 		return err
 	}
 
+	// Calculate stats for notification
+	duration := time.Since(startTime)
+	var totalRows int64
+	for _, t := range tables {
+		totalRows += t.RowCount
+	}
+	throughput := float64(totalRows) / duration.Seconds()
+
 	o.state.CompleteRun(runID, "success")
+	o.notifier.MigrationCompleted(runID, duration, totalRows, throughput)
 	fmt.Println("Migration complete!")
 
 	return nil
+}
+
+// notifyFailure sends a failure notification
+func (o *Orchestrator) notifyFailure(runID string, err error, duration time.Duration) {
+	o.notifier.MigrationFailed(runID, err, duration)
 }
 
 func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []source.Table) error {

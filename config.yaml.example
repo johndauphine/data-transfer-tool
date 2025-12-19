@@ -39,3 +39,10 @@ migration:
 
   # Directory for state database and logs
   data_dir: ~/.mssql-pg-migrate
+
+# Slack notifications (optional)
+slack:
+  enabled: false
+  webhook_url: ${SLACK_WEBHOOK_URL}
+  channel: "#data-engineering"
+  username: mssql-pg-migrate
