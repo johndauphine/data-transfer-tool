@@ -797,7 +797,8 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	fmt.Printf("Resuming transfer of %d tables\n", len(tablesToTransfer))
 
 	// For tables that need transfer, ensure target tables exist
-	// (they should, but check in case of partial DDL)
+	// Check for chunk-level progress to avoid unnecessary truncation
+	progressSaver := checkpoint.NewProgressSaver(o.state)
 	for _, t := range tablesToTransfer {
 		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
 		if err != nil {
@@ -810,11 +811,19 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 				return fmt.Errorf("creating table %s: %w", t.Name, err)
 			}
 		} else {
-			// Truncate to ensure clean re-transfer
-			if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
-				o.state.CompleteRun(run.ID, "failed")
-				return fmt.Errorf("truncating table %s: %w", t.Name, err)
+			// Check if we have saved chunk progress for this table
+			taskKey := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
+			taskID, _ := o.state.CreateTask(run.ID, "transfer", taskKey)
+			lastPK, _, _ := progressSaver.GetProgress(taskID)
+
+			if lastPK == nil {
+				// No chunk progress - truncate to ensure clean re-transfer
+				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
+					o.state.CompleteRun(run.ID, "failed")
+					return fmt.Errorf("truncating table %s: %w", t.Name, err)
+				}
 			}
+			// If we have chunk progress, don't truncate - transfer.Execute will handle cleanup
 		}
 	}
 

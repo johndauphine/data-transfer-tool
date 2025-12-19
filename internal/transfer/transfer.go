@@ -89,6 +89,18 @@ func Execute(
 				}
 			}
 		}
+	} else if job.Table.SupportsKeysetPagination() {
+		// Chunk-level resume: delete any rows beyond the saved lastPK
+		// This handles partial data written after the last saved checkpoint
+		pkCol := job.Table.PrimaryKey[0]
+		deleteQuery := fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1`,
+			cfg.Target.Schema, job.Table.Name, pkCol)
+		result, err := tgtPool.Pool().Exec(ctx, deleteQuery, resumeLastPK)
+		if err != nil {
+			fmt.Printf("Warning: cleaning up partial data for %s: %v\n", job.Table.Name, err)
+		} else if result.RowsAffected() > 0 {
+			fmt.Printf("Cleaned up %d partial rows from %s (pk > %v)\n", result.RowsAffected(), job.Table.Name, resumeLastPK)
+		}
 	}
 
 	// Build column list

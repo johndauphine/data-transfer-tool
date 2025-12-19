@@ -168,8 +168,9 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 	return &r, nil
 }
 
-// CreateTask creates a new task
+// CreateTask creates a new task or returns existing task ID
 func (s *State) CreateTask(runID, taskType, taskKey string) (int64, error) {
+	// Try to insert new task
 	result, err := s.db.Exec(`
 		INSERT INTO tasks (run_id, task_type, task_key, status)
 		VALUES (?, ?, ?, 'pending')
@@ -178,7 +179,19 @@ func (s *State) CreateTask(runID, taskType, taskKey string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return result.LastInsertId()
+
+	// Check if we inserted a new row
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected > 0 {
+		return result.LastInsertId()
+	}
+
+	// Task already exists - get its ID
+	var taskID int64
+	err = s.db.QueryRow(`
+		SELECT id FROM tasks WHERE run_id = ? AND task_key = ?
+	`, runID, taskKey).Scan(&taskID)
+	return taskID, err
 }
 
 // UpdateTaskStatus updates a task's status
