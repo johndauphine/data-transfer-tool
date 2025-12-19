@@ -88,6 +88,9 @@ migration:
     - temp_*
   data_dir: ~/.mssql-pg-migrate
 
+  # Target table handling (optional)
+  target_mode: drop_recreate  # "drop_recreate" (default) or "truncate"
+
   # Schema objects (optional)
   create_indexes: true
   create_foreign_keys: true
@@ -191,6 +194,21 @@ The tool automatically selects the best pagination strategy per table:
 | xml | xml |
 
 ## Advanced Options
+
+### Target Mode
+
+Control how target tables are prepared before migration:
+
+```yaml
+migration:
+  target_mode: drop_recreate  # Default: drop and recreate tables
+  # target_mode: truncate     # Truncate existing tables (faster if schema unchanged)
+```
+
+| Mode | Behavior |
+|------|----------|
+| `drop_recreate` | Drops existing tables and recreates them (default). Ensures schema changes are applied. |
+| `truncate` | Truncates existing tables if they exist, creates if not. Faster for repeated migrations with unchanged schema. |
 
 ### Strict Consistency Mode
 

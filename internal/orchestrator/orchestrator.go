@@ -161,16 +161,43 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.notifier.MigrationStarted(runID, o.config.Source.Database, o.config.Target.Database, len(tables))
 
 	// Create target schema and tables
-	fmt.Println("Creating target tables...")
 	if err := o.targetPool.CreateSchema(ctx, o.config.Target.Schema); err != nil {
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("creating schema: %w", err)
 	}
 
-	for _, t := range tables {
-		if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
-			o.notifyFailure(runID, err, time.Since(startTime))
-			return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+	if o.config.Migration.TargetMode == "truncate" {
+		fmt.Println("Preparing target tables (truncate mode)...")
+		for _, t := range tables {
+			exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
+			if err != nil {
+				o.notifyFailure(runID, err, time.Since(startTime))
+				return fmt.Errorf("checking if table %s exists: %w", t.Name, err)
+			}
+			if exists {
+				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
+					o.notifyFailure(runID, err, time.Since(startTime))
+					return fmt.Errorf("truncating table %s: %w", t.Name, err)
+				}
+			} else {
+				if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
+					o.notifyFailure(runID, err, time.Since(startTime))
+					return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+				}
+			}
+		}
+	} else {
+		// Default: drop_recreate
+		fmt.Println("Creating target tables (drop and recreate)...")
+		for _, t := range tables {
+			if err := o.targetPool.DropTable(ctx, o.config.Target.Schema, t.Name); err != nil {
+				o.notifyFailure(runID, err, time.Since(startTime))
+				return fmt.Errorf("dropping table %s: %w", t.Name, err)
+			}
+			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
+				o.notifyFailure(runID, err, time.Since(startTime))
+				return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+			}
 		}
 	}
 

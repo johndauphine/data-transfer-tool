@@ -40,6 +40,11 @@ migration:
   # Directory for state database and logs
   data_dir: ~/.mssql-pg-migrate
 
+  # Target table handling: "drop_recreate" (default) or "truncate"
+  # - drop_recreate: Drop and recreate tables (ensures schema changes are applied)
+  # - truncate: Truncate existing tables (faster if schema hasn't changed)
+  target_mode: drop_recreate
+
   # Schema object creation options
   create_indexes: true          # Create non-PK indexes after data transfer
   create_foreign_keys: true     # Create foreign key constraints

@@ -77,6 +77,23 @@ func (p *Pool) TruncateTable(ctx context.Context, schema, table string) error {
 	return err
 }
 
+// DropTable drops a table if it exists
+func (p *Pool) DropTable(ctx context.Context, schema, table string) error {
+	_, err := p.pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s.%q CASCADE", schema, table))
+	return err
+}
+
+// TableExists checks if a table exists in the schema
+func (p *Pool) TableExists(ctx context.Context, schema, table string) (bool, error) {
+	var exists bool
+	err := p.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = $1 AND table_name = $2
+		)
+	`, schema, table).Scan(&exists)
+	return exists, err
+}
 
 // CreatePrimaryKey creates a primary key on the table
 func (p *Pool) CreatePrimaryKey(ctx context.Context, t *source.Table, targetSchema string) error {
