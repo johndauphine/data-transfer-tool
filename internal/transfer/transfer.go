@@ -32,6 +32,18 @@ type Job struct {
 	Saver     ProgressSaver // For saving progress (nil to disable)
 }
 
+// chunkResult holds a chunk of data for the read-ahead pipeline
+type chunkResult struct {
+	rows      [][]any
+	lastPK    any
+	rowNum    int64 // for ROW_NUMBER pagination progress tracking
+	queryTime time.Duration
+	scanTime  time.Duration
+	readEnd   time.Time // when this chunk finished reading
+	err       error
+	done      bool // signals end of data
+}
+
 // TransferStats tracks timing statistics for profiling
 type TransferStats struct {
 	QueryTime time.Duration
@@ -336,6 +348,7 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 }
 
 // executeKeysetPagination uses WHERE pk > last_pk for efficient pagination
+// with async read-ahead pipelining to overlap reads and writes
 func executeKeysetPagination(
 	ctx context.Context,
 	srcPool pool.SourcePool,
@@ -356,7 +369,7 @@ func executeKeysetPagination(
 	colList := syntax.columnList(cols)
 	tableHint := syntax.tableHint(cfg.Migration.StrictConsistency)
 
-	var lastPK any
+	var initialLastPK any
 	var maxPK any
 
 	// Set partition bounds if applicable
@@ -366,98 +379,155 @@ func executeKeysetPagination(
 
 	// Use resume point if available, otherwise start from partition min
 	if resumeLastPK != nil {
-		lastPK = resumeLastPK
+		initialLastPK = resumeLastPK
 	} else if job.Partition != nil {
 		// Start from one before minPK to include minPK in first chunk
-		lastPK = decrementPK(job.Partition.MinPK)
+		initialLastPK = decrementPK(job.Partition.MinPK)
 	}
 
 	chunkSize := cfg.Migration.ChunkSize
-	totalTransferred := resumeRowsDone
-	chunkCount := 0
-	const saveProgressEvery = 10 // Save progress every N chunks
 
-	for {
-		select {
-		case <-ctx.Done():
-			return stats, ctx.Err()
-		default:
+	// For non-partitioned tables, get initial PK
+	if initialLastPK == nil && job.Partition == nil {
+		var firstPK any
+		minQuery := fmt.Sprintf("SELECT MIN(%s) FROM %s %s",
+			syntax.quoteIdent(pkCol), syntax.qualifiedTable(job.Table.Schema, job.Table.Name), tableHint)
+		err := db.QueryRowContext(ctx, minQuery).Scan(&firstPK)
+		if err != nil || firstPK == nil {
+			return stats, nil // Empty table
 		}
+		initialLastPK = decrementPK(firstPK)
+	}
 
-		var query string
-		var args []any
-		hasMaxPK := job.Partition != nil
+	// Find PK column index
+	pkIdx := 0
+	for i, c := range cols {
+		if c == pkCol {
+			pkIdx = i
+			break
+		}
+	}
 
-		if job.Partition != nil {
-			// Keyset pagination within partition bounds
-			query = syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true)
-			args = syntax.buildKeysetArgs(lastPK, maxPK, chunkSize, true)
-		} else {
-			// Keyset pagination for entire table
-			if lastPK == nil {
-				// First chunk - get minimum PK value first
-				var firstPK any
-				minQuery := fmt.Sprintf("SELECT MIN(%s) FROM %s %s",
-					syntax.quoteIdent(pkCol), syntax.qualifiedTable(job.Table.Schema, job.Table.Name), tableHint)
-				err := db.QueryRowContext(ctx, minQuery).Scan(&firstPK)
-				if err != nil || firstPK == nil {
-					return stats, nil // Empty table
-				}
-				lastPK = decrementPK(firstPK)
+	// Create buffered channel for read-ahead pipeline
+	// ReadAheadBuffers controls how many chunks to read ahead (0 = synchronous)
+	bufferSize := cfg.Migration.ReadAheadBuffers
+	if bufferSize < 0 {
+		bufferSize = 0
+	}
+	chunkChan := make(chan chunkResult, bufferSize)
+
+	// Start reader goroutine
+	go func() {
+		defer close(chunkChan)
+		lastPK := initialLastPK
+
+		for {
+			select {
+			case <-ctx.Done():
+				chunkChan <- chunkResult{err: ctx.Err()}
+				return
+			default:
 			}
 
-			query = syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, false)
-			args = syntax.buildKeysetArgs(lastPK, nil, chunkSize, false)
-		}
-		_ = hasMaxPK // suppress unused variable warning
+			var query string
+			var args []any
 
-		// Time the query
-		queryStart := time.Now()
-		rows, err := db.QueryContext(ctx, query, args...)
-		stats.QueryTime += time.Since(queryStart)
-		if err != nil {
-			return stats, fmt.Errorf("keyset query: %w", err)
-		}
+			if job.Partition != nil {
+				query = syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true)
+				args = syntax.buildKeysetArgs(lastPK, maxPK, chunkSize, true)
+			} else {
+				query = syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, false)
+				args = syntax.buildKeysetArgs(lastPK, nil, chunkSize, false)
+			}
 
-		// Time the scan
-		scanStart := time.Now()
-		chunk, newLastPK, err := scanRows(rows, cols, colTypes)
-		rows.Close()
-		stats.ScanTime += time.Since(scanStart)
-		if err != nil {
-			return stats, fmt.Errorf("scanning rows: %w", err)
-		}
+			// Time the query
+			queryStart := time.Now()
+			rows, err := db.QueryContext(ctx, query, args...)
+			queryTime := time.Since(queryStart)
+			if err != nil {
+				chunkChan <- chunkResult{err: fmt.Errorf("keyset query: %w", err)}
+				return
+			}
 
-		if len(chunk) == 0 {
+			// Time the scan
+			scanStart := time.Now()
+			chunk, _, err := scanRows(rows, cols, colTypes)
+			rows.Close()
+			scanTime := time.Since(scanStart)
+			if err != nil {
+				chunkChan <- chunkResult{err: fmt.Errorf("scanning rows: %w", err)}
+				return
+			}
+
+			if len(chunk) == 0 {
+				chunkChan <- chunkResult{done: true}
+				return
+			}
+
+			// Update lastPK for next iteration
+			lastPK = chunk[len(chunk)-1][pkIdx]
+
+			chunkChan <- chunkResult{
+				rows:      chunk,
+				lastPK:    lastPK,
+				queryTime: queryTime,
+				scanTime:  scanTime,
+				readEnd:   time.Now(),
+			}
+
+			if len(chunk) < chunkSize {
+				chunkChan <- chunkResult{done: true}
+				return
+			}
+		}
+	}()
+
+	// Writer loop - consume chunks from channel and write
+	totalTransferred := resumeRowsDone
+	chunkCount := 0
+	const saveProgressEvery = 10
+	var lastPK any
+	var totalOverlap time.Duration
+	var lastWriteEnd time.Time
+
+	for result := range chunkChan {
+		if result.err != nil {
+			return stats, result.err
+		}
+		if result.done {
 			break
 		}
 
-		// Find PK column index for updating lastPK
-		pkIdx := 0
-		for i, c := range cols {
-			if c == pkCol {
-				pkIdx = i
-				break
-			}
+		stats.QueryTime += result.queryTime
+		stats.ScanTime += result.scanTime
+		lastPK = result.lastPK
+
+		// Calculate overlap: if this chunk was ready before last write ended, we had overlap
+		receiveTime := time.Now()
+		if !lastWriteEnd.IsZero() && !result.readEnd.IsZero() && result.readEnd.Before(lastWriteEnd) {
+			overlap := lastWriteEnd.Sub(result.readEnd)
+			totalOverlap += overlap
 		}
-		lastPK = chunk[len(chunk)-1][pkIdx]
 
 		// Time the write
 		writeStart := time.Now()
-		if err := writeChunkGeneric(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, chunk); err != nil {
+		if err := writeChunkGeneric(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, result.rows); err != nil {
 			return stats, fmt.Errorf("writing chunk: %w", err)
 		}
 		stats.WriteTime += time.Since(writeStart)
+		lastWriteEnd = time.Now()
 
-		prog.Add(int64(len(chunk)))
-		totalTransferred += int64(len(chunk))
+		// Log overlap stats periodically
+		if chunkCount > 0 && chunkCount%50 == 0 {
+			waitTime := writeStart.Sub(receiveTime)
+			fmt.Printf("  [pipeline] %s chunk=%d overlap=%v chanWait=%v buffers=%d\n",
+				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize)
+		}
+
+		prog.Add(int64(len(result.rows)))
+		totalTransferred += int64(len(result.rows))
 		stats.Rows = totalTransferred
 		chunkCount++
-
-		// Update lastPK for next iteration
-		if newLastPK != nil {
-			lastPK = newLastPK
-		}
 
 		// Save progress periodically for chunk-level resume
 		if job.Saver != nil && job.TaskID > 0 && chunkCount%saveProgressEvery == 0 {
@@ -469,16 +539,13 @@ func executeKeysetPagination(
 				fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
 			}
 		}
-
-		if len(chunk) < chunkSize {
-			break
-		}
 	}
 
 	return stats, nil
 }
 
 // executeRowNumberPagination uses ROW_NUMBER for composite/varchar PKs
+// with async read-ahead pipelining to overlap reads and writes
 func executeRowNumberPagination(
 	ctx context.Context,
 	srcPool pool.SourcePool,
@@ -525,63 +592,130 @@ func executeRowNumberPagination(
 	}
 
 	// Resume from saved progress if available
-	rowNum := startRow
+	initialRowNum := startRow
 	if resumeRowsDone > 0 {
-		rowNum = resumeRowsDone
+		initialRowNum = resumeRowsDone
 	}
 
+	// Create buffered channel for read-ahead pipeline
+	bufferSize := cfg.Migration.ReadAheadBuffers
+	if bufferSize < 0 {
+		bufferSize = 0
+	}
+	chunkChan := make(chan chunkResult, bufferSize)
+
+	// Start reader goroutine
+	go func() {
+		defer close(chunkChan)
+		rowNum := initialRowNum
+
+		for rowNum < endRow {
+			select {
+			case <-ctx.Done():
+				chunkChan <- chunkResult{err: ctx.Err()}
+				return
+			default:
+			}
+
+			// Adjust chunk size if near end of partition
+			effectiveChunkSize := chunkSize
+			if rowNum+int64(chunkSize) > endRow {
+				effectiveChunkSize = int(endRow - rowNum)
+			}
+
+			// ROW_NUMBER pagination with direction-aware syntax
+			query := syntax.buildRowNumberQuery(colList, orderBy, job.Table.Schema, job.Table.Name, tableHint)
+			args := syntax.buildRowNumberArgs(rowNum, effectiveChunkSize)
+
+			// Time the query
+			queryStart := time.Now()
+			rows, err := db.QueryContext(ctx, query, args...)
+			queryTime := time.Since(queryStart)
+			if err != nil {
+				chunkChan <- chunkResult{err: fmt.Errorf("row_number query: %w", err)}
+				return
+			}
+
+			// Time the scan
+			scanStart := time.Now()
+			chunk, _, err := scanRows(rows, cols, colTypes)
+			rows.Close()
+			scanTime := time.Since(scanStart)
+			if err != nil {
+				chunkChan <- chunkResult{err: fmt.Errorf("scanning rows: %w", err)}
+				return
+			}
+
+			if len(chunk) == 0 {
+				chunkChan <- chunkResult{done: true}
+				return
+			}
+
+			// Update rowNum for progress tracking
+			newRowNum := rowNum + int64(len(chunk))
+
+			chunkChan <- chunkResult{
+				rows:      chunk,
+				rowNum:    newRowNum,
+				queryTime: queryTime,
+				scanTime:  scanTime,
+				readEnd:   time.Now(),
+			}
+
+			rowNum = newRowNum
+
+			if len(chunk) < effectiveChunkSize {
+				chunkChan <- chunkResult{done: true}
+				return
+			}
+		}
+		chunkChan <- chunkResult{done: true}
+	}()
+
+	// Writer loop - consume chunks from channel and write
 	chunkCount := 0
 	const saveProgressEvery = 10
 	totalTransferred := int64(0)
+	var currentRowNum int64
+	var totalOverlap time.Duration
+	var lastWriteEnd time.Time
 
-	for rowNum < endRow {
-		select {
-		case <-ctx.Done():
-			return stats, ctx.Err()
-		default:
+	for result := range chunkChan {
+		if result.err != nil {
+			return stats, result.err
 		}
-
-		// Adjust chunk size if near end of partition
-		effectiveChunkSize := chunkSize
-		if rowNum+int64(chunkSize) > endRow {
-			effectiveChunkSize = int(endRow - rowNum)
-		}
-
-		// ROW_NUMBER pagination with direction-aware syntax
-		query := syntax.buildRowNumberQuery(colList, orderBy, job.Table.Schema, job.Table.Name, tableHint)
-		args := syntax.buildRowNumberArgs(rowNum, effectiveChunkSize)
-
-		// Time the query
-		queryStart := time.Now()
-		rows, err := db.QueryContext(ctx, query, args...)
-		stats.QueryTime += time.Since(queryStart)
-		if err != nil {
-			return stats, fmt.Errorf("row_number query: %w", err)
-		}
-
-		// Time the scan
-		scanStart := time.Now()
-		chunk, _, err := scanRows(rows, cols, colTypes)
-		rows.Close()
-		stats.ScanTime += time.Since(scanStart)
-		if err != nil {
-			return stats, fmt.Errorf("scanning rows: %w", err)
-		}
-
-		if len(chunk) == 0 {
+		if result.done {
 			break
+		}
+
+		stats.QueryTime += result.queryTime
+		stats.ScanTime += result.scanTime
+		currentRowNum = result.rowNum
+
+		// Calculate overlap: if this chunk was ready before last write ended, we had overlap
+		receiveTime := time.Now()
+		if !lastWriteEnd.IsZero() && !result.readEnd.IsZero() && result.readEnd.Before(lastWriteEnd) {
+			overlap := lastWriteEnd.Sub(result.readEnd)
+			totalOverlap += overlap
 		}
 
 		// Time the write
 		writeStart := time.Now()
-		if err := writeChunkGeneric(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, chunk); err != nil {
-			return stats, fmt.Errorf("writing chunk at row %d: %w", rowNum, err)
+		if err := writeChunkGeneric(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, result.rows); err != nil {
+			return stats, fmt.Errorf("writing chunk at row %d: %w", currentRowNum, err)
 		}
 		stats.WriteTime += time.Since(writeStart)
+		lastWriteEnd = time.Now()
 
-		prog.Add(int64(len(chunk)))
-		rowNum += int64(len(chunk))
-		totalTransferred += int64(len(chunk))
+		// Log overlap stats periodically
+		if chunkCount > 0 && chunkCount%50 == 0 {
+			waitTime := writeStart.Sub(receiveTime)
+			fmt.Printf("  [pipeline] %s chunk=%d overlap=%v chanWait=%v buffers=%d\n",
+				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize)
+		}
+
+		prog.Add(int64(len(result.rows)))
+		totalTransferred += int64(len(result.rows))
 		stats.Rows = totalTransferred
 		chunkCount++
 
@@ -596,13 +730,9 @@ func executeRowNumberPagination(
 				partitionRows = job.Table.RowCount
 			}
 			// For ROW_NUMBER pagination, save rowNum as progress (not lastPK)
-			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, rowNum, totalTransferred, partitionRows); err != nil {
+			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, currentRowNum, totalTransferred, partitionRows); err != nil {
 				fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
 			}
-		}
-
-		if len(chunk) < effectiveChunkSize {
-			break
 		}
 	}
 

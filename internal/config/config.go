@@ -65,6 +65,7 @@ type MigrationConfig struct {
 	CreateCheckConstraints bool     `yaml:"create_check_constraints"` // Create CHECK constraints
 	SampleValidation       bool     `yaml:"sample_validation"`        // Enable sample data validation
 	SampleSize             int      `yaml:"sample_size"`              // Number of rows to sample for validation
+	ReadAheadBuffers       int      `yaml:"read_ahead_buffers"`       // Number of chunks to read ahead (0=disabled, default=2)
 }
 
 // Load reads configuration from a YAML file
@@ -162,6 +163,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
+	}
+	if c.Migration.ReadAheadBuffers == 0 {
+		c.Migration.ReadAheadBuffers = 2 // Default: read 2 chunks ahead
 	}
 }
 

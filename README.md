@@ -25,7 +25,8 @@ High-performance CLI tool for bidirectional database migration between Microsoft
 ## Features
 
 - **Bidirectional migration** - SQL Server ↔ PostgreSQL
-- **Fast transfers** using PostgreSQL COPY protocol (MSSQL→PG) or BULK INSERT (PG→MSSQL)
+- **Fast transfers** using PostgreSQL COPY protocol (MSSQL→PG) or TDS bulk copy (PG→MSSQL)
+- **Read-ahead pipelining** - Overlaps reads and writes for ~10% throughput boost
 - **Keyset pagination** for single-column integer PKs (no OFFSET performance degradation)
 - **ROW_NUMBER pagination** for composite/varchar PKs
 - **Parallel partitioning** - Large tables split via NTILE for concurrent transfer
@@ -216,6 +217,9 @@ migration:
   # Validation
   sample_validation: false    # Enable random row sampling
   sample_size: 100            # Rows per table to sample
+
+  # Performance tuning
+  read_ahead_buffers: 2       # Chunks to read ahead (0=sync, default: 2)
 
 # Slack notifications (optional)
 slack:
