@@ -76,4 +76,10 @@ var (
 			
 	styleSystemOutput = lipgloss.NewStyle().
 			Foreground(colorLightGray)
+
+	styleInputContainer = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorPurple).
+			Padding(0, 1).
+			MarginRight(1)
 )

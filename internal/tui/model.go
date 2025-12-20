@@ -13,7 +13,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
-	"github.com/muesli/reflow/wordwrap"
 	"gopkg.in/yaml.v3"
 )
 
@@ -58,6 +57,7 @@ type Model struct {
 	history     []string
 	historyIdx  int
 	logBuffer   string // Persistent buffer for logs
+	lineBuffer  string // Buffer for incoming partial lines
 
 	// Wizard state
 	mode        sessionMode
@@ -154,7 +154,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		headerHeight := 0
-		footerHeight := 2 // Input bar + Status bar
+		footerHeight := 4 // Bordered input (3) + Status bar (1)
 		verticalMarginHeight := headerHeight + footerHeight
 
 		if !m.ready {
@@ -173,28 +173,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textInput.Width = msg.Width - 4
 
 	case OutputMsg:
-		// Append to persistent buffer, NOT just the view
-		text := string(msg)
-		prefix := "  " // Default indentation
-		
-		lowerText := strings.ToLower(text)
-		if strings.Contains(lowerText, "error") || strings.Contains(lowerText, "fail") {
-			prefix = styleError.Render("✖ ")
-		} else if strings.Contains(lowerText, "success") || strings.Contains(lowerText, "passed") {
-			prefix = styleSuccess.Render("✔ ")
-		}
+		m.lineBuffer += string(msg)
 
-		// Calculate wrap width (viewport width - indentation)
-		wrapWidth := m.viewport.Width - lipgloss.Width(prefix)
-		if wrapWidth < 10 {
-			wrapWidth = 10 // Safety minimum
+		// Process complete lines
+		for {
+			newlineIdx := strings.Index(m.lineBuffer, "\n")
+			if newlineIdx == -1 {
+				break
+			}
+
+			// Extract line
+			line := m.lineBuffer[:newlineIdx]
+			m.lineBuffer = m.lineBuffer[newlineIdx+1:]
+
+			// Handle carriage returns (simulate line overwrite by taking last part)
+			if lastCR := strings.LastIndex(line, "\r"); lastCR != -1 {
+				line = line[lastCR+1:]
+			}
+
+			// Apply styling
+			lowerText := strings.ToLower(line)
+			prefix := "  "
+			if strings.Contains(lowerText, "error") || strings.Contains(lowerText, "fail") {
+				line = styleError.Render(line)
+				prefix = styleError.Render("✖ ")
+			} else if strings.Contains(lowerText, "success") || strings.Contains(lowerText, "passed") {
+				line = styleSuccess.Render(line)
+				prefix = styleSuccess.Render("✔ ")
+			} else {
+				line = styleSystemOutput.Render(line)
+			}
+
+			// Append to log
+			m.logBuffer += prefix + line + "\n"
 		}
 		
-		wrappedText := wordwrap.String(text, wrapWidth)
-		// Re-indent subsequent lines if wrapped
-		indentedText := strings.ReplaceAll(wrappedText, "\n", "\n"+strings.Repeat(" ", lipgloss.Width(prefix)))
-		
-		m.logBuffer += prefix + styleSystemOutput.Render(indentedText) + "\n"
+		// Update viewport
 		m.viewport.SetContent(m.logBuffer)
 		m.viewport.GotoBottom()
 
@@ -232,7 +246,7 @@ func (m Model) View() string {
 
 	return fmt.Sprintf("%s\n%s\n%s",
 		m.viewport.View(),
-		m.textInput.View(),
+		styleInputContainer.Width(m.width-2).Render(m.textInput.View()),
 		m.statusBarView(),
 	)
 }
@@ -245,9 +259,9 @@ func (m Model) statusBarView() string {
 
 	status := ""
 	if m.gitInfo.Status == "Dirty" {
-		status = styleStatusDirty.Render("Wait") // Dirty
+		status = styleStatusDirty.Render("Uncommitted Changes") 
 	} else {
-		status = styleStatusClean.Render("Ready") // Clean
+		status = styleStatusClean.Render("All Changes Committed") 
 	}
 
 	// Calculate remaining width for spacer

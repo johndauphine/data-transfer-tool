@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"sync"
@@ -31,10 +30,15 @@ func CaptureOutput(p *tea.Program) func() {
 
 	go func() {
 		defer wg.Done()
-		scanner := bufio.NewScanner(r)
-		for scanner.Scan() {
-			text := scanner.Text()
-			p.Send(OutputMsg(text))
+		buf := make([]byte, 1024)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				p.Send(OutputMsg(string(buf[:n])))
+			}
+			if err != nil {
+				break
+			}
 		}
 	}()
 
