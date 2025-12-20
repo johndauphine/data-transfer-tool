@@ -107,6 +107,9 @@ type MigrationConfig struct {
 
 // Load reads configuration from a YAML file
 func Load(path string) (*Config, error) {
+	// Check file permissions before reading (warns if insecure)
+	checkFilePermissions(path)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config file: %w", err)
