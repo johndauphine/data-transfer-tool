@@ -96,6 +96,7 @@ type MigrationConfig struct {
 	ReadAheadBuffers       int      `yaml:"read_ahead_buffers"`       // Number of chunks to read ahead (default=8)
 	WriteAheadWriters      int      `yaml:"write_ahead_writers"`      // Number of parallel writers per job (default=2)
 	ParallelReaders        int      `yaml:"parallel_readers"`         // Number of parallel readers per job (default=2)
+	MSSQLRowsPerBatch      int      `yaml:"mssql_rows_per_batch"`     // MSSQL bulk copy hint (default=chunk_size)
 }
 
 // Load reads configuration from a YAML file
@@ -220,6 +221,8 @@ func (c *Config) applyDefaults() {
 	if c.Migration.ParallelReaders == 0 {
 		c.Migration.ParallelReaders = 2 // Default: 2 parallel readers per job
 	}
+	// MSSQLRowsPerBatch defaults to chunk_size (set after chunk_size is finalized)
+	// This is applied later since it depends on ChunkSize being set
 	if c.Migration.ReadAheadBuffers == 0 {
 		// Scale buffers: enough to keep writers fed, but within memory limits
 		// Formula: targetMemoryMB / workers / (chunkSize * 500 bytes avg)
@@ -246,6 +249,11 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Migration.MaxPgConnections < minTargetConns {
 		c.Migration.MaxPgConnections = minTargetConns + 4
+	}
+
+	// Default MSSQLRowsPerBatch to chunk_size if not specified
+	if c.Migration.MSSQLRowsPerBatch == 0 {
+		c.Migration.MSSQLRowsPerBatch = c.Migration.ChunkSize
 	}
 }
 

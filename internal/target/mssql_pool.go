@@ -15,13 +15,14 @@ import (
 
 // MSSQLPool manages a pool of SQL Server target connections
 type MSSQLPool struct {
-	db       *sql.DB
-	config   *config.TargetConfig
-	maxConns int
+	db           *sql.DB
+	config       *config.TargetConfig
+	maxConns     int
+	rowsPerBatch int // Hint for bulk copy optimizer
 }
 
 // NewMSSQLPool creates a new SQL Server target connection pool
-func NewMSSQLPool(cfg *config.TargetConfig, maxConns int) (*MSSQLPool, error) {
+func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int) (*MSSQLPool, error) {
 	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&TrustServerCertificate=true",
 		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
 
@@ -42,9 +43,10 @@ func NewMSSQLPool(cfg *config.TargetConfig, maxConns int) (*MSSQLPool, error) {
 	}
 
 	return &MSSQLPool{
-		db:       db,
-		config:   cfg,
-		maxConns: maxConns,
+		db:           db,
+		config:       cfg,
+		maxConns:     maxConns,
+		rowsPerBatch: rowsPerBatch,
 	}, nil
 }
 
@@ -303,9 +305,13 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 	// Prepare bulk copy statement with performance hints
 	// - Tablock: acquire table lock to reduce lock overhead
 	// - RowsPerBatch: hint to optimizer for memory allocation
+	rowsPerBatch := p.rowsPerBatch
+	if rowsPerBatch <= 0 || rowsPerBatch > len(rows) {
+		rowsPerBatch = len(rows) // Use actual row count if not set or too large
+	}
 	bulkOpts := mssql.BulkOptions{
 		Tablock:      true,
-		RowsPerBatch: len(rows),
+		RowsPerBatch: rowsPerBatch,
 	}
 	stmt, err := txn.PrepareContext(ctx, mssql.CopyIn(fullTableName, bulkOpts, cols...))
 	if err != nil {

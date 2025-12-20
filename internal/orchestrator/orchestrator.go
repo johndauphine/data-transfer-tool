@@ -66,7 +66,7 @@ func New(cfg *config.Config) (*Orchestrator, error) {
 	}
 
 	// Create target pool using factory
-	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns)
+	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, cfg.Migration.MSSQLRowsPerBatch)
 	if err != nil {
 		sourcePool.Close()
 		return nil, fmt.Errorf("creating target pool: %w", err)

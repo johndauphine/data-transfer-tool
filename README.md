@@ -10,7 +10,7 @@ High-performance CLI tool for bidirectional database migration between Microsoft
 ## Performance
 
 - **575,000 rows/sec** MSSQL → PostgreSQL (auto-tuned, 19M rows in 34s)
-- **234,000 rows/sec** PostgreSQL → MSSQL (auto-tuned, 19M rows in 83s)
+- **355,000 rows/sec** PostgreSQL → MSSQL (4 writers, 19M rows in 54s)
 - **Auto-tuning** based on CPU cores and available RAM
 - **3-4x faster** than equivalent Python/Airflow solutions
 
@@ -223,8 +223,9 @@ migration:
 
   # Performance tuning (auto-tuned if not specified)
   read_ahead_buffers: 8       # Chunks to buffer ahead (default: auto-scaled by RAM)
-  write_ahead_writers: 2      # Parallel writers per job (default: 2)
+  write_ahead_writers: 4      # Parallel writers per job (default: 2, try 4 for PG→MSSQL)
   parallel_readers: 1         # Parallel readers per job (default: 2, use 1 for local DBs)
+  mssql_rows_per_batch: 50000 # MSSQL bulk copy optimizer hint (default: chunk_size)
 
 # Slack notifications (optional)
 slack:
@@ -398,11 +399,12 @@ Tested on StackOverflow database dumps (Docker containers, same host, 16-core CP
 | SO2013 | 106.5M | ~3m | ~590,000 rows/sec |
 
 ### PostgreSQL → MSSQL
-| Dataset | Rows | Duration | Throughput |
-|---------|------|----------|------------|
-| SO2010 | 19.3M | 83s | **234,000 rows/sec** |
+| Dataset | Rows | Duration | Throughput | Config |
+|---------|------|----------|------------|--------|
+| SO2010 | 19.3M | 83s | 234,000 rows/sec | 2 writers |
+| SO2010 | 19.3M | 54s | **355,000 rows/sec** | 4 writers |
 
-PostgreSQL → MSSQL is ~2.5x slower due to TDS bulk copy protocol overhead vs PostgreSQL COPY.
+PostgreSQL → MSSQL is ~1.6x slower with optimized settings (4 writers) due to TDS bulk copy protocol overhead vs PostgreSQL COPY.
 
 Performance varies based on:
 - Network latency between source and target
