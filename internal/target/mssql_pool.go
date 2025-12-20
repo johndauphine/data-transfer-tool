@@ -23,8 +23,12 @@ type MSSQLPool struct {
 
 // NewMSSQLPool creates a new SQL Server target connection pool
 func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int) (*MSSQLPool, error) {
-	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&TrustServerCertificate=true",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
+	trustCert := "false"
+	if cfg.TrustServerCert {
+		trustCert = "true"
+	}
+	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
+		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, cfg.Encrypt, trustCert)
 
 	db, err := sql.Open("sqlserver", dsn)
 	if err != nil {

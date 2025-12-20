@@ -20,8 +20,8 @@ type PostgresPool struct {
 
 // NewPostgresPool creates a new PostgreSQL source connection pool
 func NewPostgresPool(cfg *config.SourceConfig, maxConns int) (*PostgresPool, error) {
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, cfg.SSLMode)
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

@@ -54,24 +54,30 @@ type SlackConfig struct {
 
 // SourceConfig holds source database connection settings
 type SourceConfig struct {
-	Type     string `yaml:"type"`     // "mssql" or "postgres" (default: mssql)
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	Database string `yaml:"database"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Schema   string `yaml:"schema"`
+	Type            string `yaml:"type"`              // "mssql" or "postgres" (default: mssql)
+	Host            string `yaml:"host"`
+	Port            int    `yaml:"port"`
+	Database        string `yaml:"database"`
+	User            string `yaml:"user"`
+	Password        string `yaml:"password"`
+	Schema          string `yaml:"schema"`
+	SSLMode         string `yaml:"ssl_mode"`          // PostgreSQL: disable, require, verify-ca, verify-full (default: require)
+	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
+	Encrypt         string `yaml:"encrypt"`           // MSSQL: disable, false, true (default: true)
 }
 
 // TargetConfig holds target database connection settings
 type TargetConfig struct {
-	Type     string `yaml:"type"` // "postgres" or "mssql" (default: postgres)
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	Database string `yaml:"database"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Schema   string `yaml:"schema"`
+	Type            string `yaml:"type"`              // "postgres" or "mssql" (default: postgres)
+	Host            string `yaml:"host"`
+	Port            int    `yaml:"port"`
+	Database        string `yaml:"database"`
+	User            string `yaml:"user"`
+	Password        string `yaml:"password"`
+	Schema          string `yaml:"schema"`
+	SSLMode         string `yaml:"ssl_mode"`          // PostgreSQL: disable, require, verify-ca, verify-full (default: require)
+	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
+	Encrypt         string `yaml:"encrypt"`           // MSSQL: disable, false, true (default: true)
 }
 
 // MigrationConfig holds migration behavior settings
@@ -144,6 +150,13 @@ func (c *Config) applyDefaults() {
 			c.Source.Schema = "dbo"
 		}
 	}
+	// SSL defaults for source
+	if c.Source.SSLMode == "" {
+		c.Source.SSLMode = "require" // Secure default for PostgreSQL
+	}
+	if c.Source.Encrypt == "" {
+		c.Source.Encrypt = "true" // Secure default for MSSQL
+	}
 
 	// Target defaults
 	if c.Target.Type == "" {
@@ -163,6 +176,14 @@ func (c *Config) applyDefaults() {
 			c.Target.Schema = "public"
 		}
 	}
+	// SSL defaults for target
+	if c.Target.SSLMode == "" {
+		c.Target.SSLMode = "require" // Secure default for PostgreSQL
+	}
+	if c.Target.Encrypt == "" {
+		c.Target.Encrypt = "true" // Secure default for MSSQL
+	}
+
 	// Handle backwards compatibility: if max_connections is set but new options aren't
 	if c.Migration.MaxConnections == 0 {
 		c.Migration.MaxConnections = 12
@@ -295,21 +316,29 @@ func (c *Config) validate() error {
 // SourceDSN returns the source database connection string
 func (c *Config) SourceDSN() string {
 	if c.Source.Type == "postgres" {
-		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-			c.Source.User, c.Source.Password, c.Source.Host, c.Source.Port, c.Source.Database)
+		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+			c.Source.User, c.Source.Password, c.Source.Host, c.Source.Port, c.Source.Database, c.Source.SSLMode)
 	}
 	// Default: MSSQL
-	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&TrustServerCertificate=true",
-		c.Source.User, c.Source.Password, c.Source.Host, c.Source.Port, c.Source.Database)
+	trustCert := "false"
+	if c.Source.TrustServerCert {
+		trustCert = "true"
+	}
+	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
+		c.Source.User, c.Source.Password, c.Source.Host, c.Source.Port, c.Source.Database, c.Source.Encrypt, trustCert)
 }
 
 // TargetDSN returns the target database connection string
 func (c *Config) TargetDSN() string {
 	if c.Target.Type == "mssql" {
-		return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&TrustServerCertificate=true",
-			c.Target.User, c.Target.Password, c.Target.Host, c.Target.Port, c.Target.Database)
+		trustCert := "false"
+		if c.Target.TrustServerCert {
+			trustCert = "true"
+		}
+		return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
+			c.Target.User, c.Target.Password, c.Target.Host, c.Target.Port, c.Target.Database, c.Target.Encrypt, trustCert)
 	}
 	// Default: PostgreSQL
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		c.Target.User, c.Target.Password, c.Target.Host, c.Target.Port, c.Target.Database)
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		c.Target.User, c.Target.Password, c.Target.Host, c.Target.Port, c.Target.Database, c.Target.SSLMode)
 }

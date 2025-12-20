@@ -173,6 +173,10 @@ source:
   user: sa
   password: ${MSSQL_PASSWORD} # Environment variable
   schema: dbo                 # Default: dbo for mssql, public for postgres
+  # SSL/TLS settings
+  ssl_mode: require           # PostgreSQL: disable, require, verify-ca, verify-full (default: require)
+  encrypt: "true"             # MSSQL: disable, false, true (default: true)
+  trust_server_cert: false    # MSSQL: trust server certificate without validation (default: false)
 
 target:
   type: postgres              # "postgres" (default) or "mssql"
@@ -182,6 +186,10 @@ target:
   user: postgres
   password: ${PG_PASSWORD}
   schema: public              # Default: public for postgres, dbo for mssql
+  # SSL/TLS settings
+  ssl_mode: require           # PostgreSQL: disable, require, verify-ca, verify-full (default: require)
+  encrypt: "true"             # MSSQL: disable, false, true (default: true)
+  trust_server_cert: false    # MSSQL: trust server certificate without validation (default: false)
 
 migration:
   # Connection pools (auto-sized if not specified)

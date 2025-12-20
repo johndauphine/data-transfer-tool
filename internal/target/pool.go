@@ -29,8 +29,8 @@ type Pool struct {
 
 // NewPool creates a new PostgreSQL connection pool
 func NewPool(cfg *config.TargetConfig, maxConns int) (*Pool, error) {
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, cfg.SSLMode)
 
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
