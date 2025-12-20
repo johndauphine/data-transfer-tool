@@ -9,9 +9,10 @@ High-performance CLI tool for bidirectional database migration between Microsoft
 
 ## Performance
 
-- **158,000 rows/sec** throughput (tested with 106M rows)
-- **2-3x faster** than equivalent Python/Airflow solutions
-- 106M rows migrated in **11 minutes**
+- **575,000 rows/sec** MSSQL → PostgreSQL (auto-tuned, 19M rows in 34s)
+- **197,000 rows/sec** PostgreSQL → MSSQL (auto-tuned, 19M rows in 98s)
+- **Auto-tuning** based on CPU cores and available RAM
+- **3-4x faster** than equivalent Python/Airflow solutions
 
 ## Supported Directions
 
@@ -25,8 +26,9 @@ High-performance CLI tool for bidirectional database migration between Microsoft
 ## Features
 
 - **Bidirectional migration** - SQL Server ↔ PostgreSQL
+- **Auto-tuning** - Workers, connection pools, and buffers sized based on CPU/RAM
 - **Fast transfers** using PostgreSQL COPY protocol (MSSQL→PG) or TDS bulk copy (PG→MSSQL)
-- **Read-ahead pipelining** - Overlaps reads and writes for ~10% throughput boost
+- **Pipelined I/O** - Read-ahead buffering and parallel writers for maximum throughput
 - **Keyset pagination** for single-column integer PKs (no OFFSET performance degradation)
 - **ROW_NUMBER pagination** for composite/varchar PKs
 - **Parallel partitioning** - Large tables split via NTILE for concurrent transfer
@@ -182,13 +184,14 @@ target:
   schema: public              # Default: public for postgres, dbo for mssql
 
 migration:
-  # Connection pools
-  max_connections: 12         # Connection pool size (both MSSQL and PG)
+  # Connection pools (auto-sized if not specified)
+  max_mssql_connections: 18   # SQL Server pool size
+  max_pg_connections: 32      # PostgreSQL pool size
 
-  # Transfer settings
-  chunk_size: 200000          # Rows per chunk (default: 200000)
-  max_partitions: 8           # Max partitions for large tables
-  workers: 8                  # Parallel workers
+  # Transfer settings (auto-tuned if not specified)
+  workers: 14                 # Parallel workers (default: CPU cores - 2)
+  chunk_size: 200000          # Rows per chunk (default: auto-scaled by RAM)
+  max_partitions: 14          # Max partitions for large tables (default: workers)
   large_table_threshold: 5000000  # Tables larger than this get partitioned
 
   # Table filtering (glob patterns)
@@ -218,9 +221,10 @@ migration:
   sample_validation: false    # Enable random row sampling
   sample_size: 100            # Rows per table to sample
 
-  # Performance tuning
-  read_ahead_buffers: 8       # Chunks to buffer for parallel writes (default: 8)
+  # Performance tuning (auto-tuned if not specified)
+  read_ahead_buffers: 8       # Chunks to buffer ahead (default: auto-scaled by RAM)
   write_ahead_writers: 2      # Parallel writers per job (default: 2)
+  parallel_readers: 1         # Parallel readers per job (default: 2, use 1 for local DBs)
 
 # Slack notifications (optional)
 slack:
@@ -385,24 +389,32 @@ Serial/identity columns are mapped to `IDENTITY(1,1)` with proper seed reset.
 
 ## Benchmarks
 
-Tested on StackOverflow database dumps (Docker containers, same host):
+Tested on StackOverflow database dumps (Docker containers, same host, 16-core CPU):
 
+### MSSQL → PostgreSQL
 | Dataset | Rows | Duration | Throughput |
 |---------|------|----------|------------|
-| SO2013 | 106.5M | 11m 13s | 158,000 rows/sec |
-| SO2010 | 19.3M | 51s | 378,000 rows/sec |
+| SO2010 | 19.3M | 34s | **575,000 rows/sec** |
+| SO2013 | 106.5M | ~3m | ~590,000 rows/sec |
+
+### PostgreSQL → MSSQL
+| Dataset | Rows | Duration | Throughput |
+|---------|------|----------|------------|
+| SO2010 | 19.3M | 98s | **197,000 rows/sec** |
+
+PostgreSQL → MSSQL is ~3x slower due to TDS bulk copy protocol overhead vs PostgreSQL COPY.
 
 Performance varies based on:
 - Network latency between source and target
 - Table structure (wide tables are slower)
 - Data types (LOBs are slower)
-- Available CPU and memory
+- Available CPU cores and memory (auto-tuned)
 
 ## Comparison with Airflow DAG
 
 | Feature | mssql-pg-migrate (Go) | Airflow DAG (Python) |
 |---------|----------------------|---------------------|
-| Throughput | 158k rows/sec | ~50-80k rows/sec |
+| Throughput | 575k rows/sec | ~50-80k rows/sec |
 | Memory usage | ~50MB | ~200-400MB |
 | Resume granularity | Chunk-level | Partition-level |
 | Dependencies | None (single binary) | Python, Airflow, etc. |
