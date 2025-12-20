@@ -13,6 +13,36 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
+	"github.com/muesli/reflow/wordwrap"
+	"gopkg.in/yaml.v3"
+)
+
+type sessionMode int
+
+const (
+	modeNormal sessionMode = iota
+	modeWizard
+)
+
+type wizardStep int
+
+const (
+	stepSourceType wizardStep = iota
+	stepSourceHost
+	stepSourcePort
+	stepSourceDB
+	stepSourceUser
+	stepSourcePass
+	stepSourceSSL
+	stepTargetType
+	stepTargetHost
+	stepTargetPort
+	stepTargetDB
+	stepTargetUser
+	stepTargetPass
+	stepTargetSSL
+	stepWorkers
+	stepDone
 )
 
 // Model is the main TUI model
@@ -27,6 +57,13 @@ type Model struct {
 	height      int
 	history     []string
 	historyIdx  int
+	logBuffer   string // Persistent buffer for logs
+
+	// Wizard state
+	mode        sessionMode
+	step        wizardStep
+	wizardData  config.Config
+	wizardInput string
 }
 
 // TickMsg is used to update the UI periodically (e.g. for git status)
@@ -83,7 +120,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyEnter:
 			value := m.textInput.Value()
+			if m.mode == modeWizard {
+				return m, m.handleWizardStep(value)
+			}
 			if value != "" {
+				m.logBuffer += styleUserInput.Render("> "+value) + "\n"
+				m.viewport.SetContent(m.logBuffer)
+				m.viewport.GotoBottom()
+				
 				m.textInput.Reset()
 				m.history = append(m.history, value)
 				m.historyIdx = len(m.history)
@@ -102,6 +146,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyIdx = len(m.history)
 				m.textInput.Reset()
 			}
+		case tea.KeyTab: // Command completion
+			if m.mode == modeNormal {
+				m.autocompleteCommand()
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -112,7 +160,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready {
 			m.viewport = viewport.New(msg.Width, msg.Height-verticalMarginHeight)
 			m.viewport.YPosition = headerHeight
-			m.viewport.SetContent(m.welcomeMessage())
+			// Initialize log buffer with welcome message
+			m.logBuffer = m.welcomeMessage()
+			m.viewport.SetContent(m.logBuffer)
 			m.ready = true
 		} else {
 			m.viewport.Width = msg.Width
@@ -123,7 +173,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textInput.Width = msg.Width - 4
 
 	case OutputMsg:
-		m.viewport.SetContent(m.viewport.View() + string(msg) + "\n")
+		// Append to persistent buffer, NOT just the view
+		text := string(msg)
+		prefix := "  " // Default indentation
+		
+		lowerText := strings.ToLower(text)
+		if strings.Contains(lowerText, "error") || strings.Contains(lowerText, "fail") {
+			prefix = styleError.Render("✖ ")
+		} else if strings.Contains(lowerText, "success") || strings.Contains(lowerText, "passed") {
+			prefix = styleSuccess.Render("✔ ")
+		}
+
+		// Calculate wrap width (viewport width - indentation)
+		wrapWidth := m.viewport.Width - lipgloss.Width(prefix)
+		if wrapWidth < 10 {
+			wrapWidth = 10 // Safety minimum
+		}
+		
+		wrappedText := wordwrap.String(text, wrapWidth)
+		// Re-indent subsequent lines if wrapped
+		indentedText := strings.ReplaceAll(wrappedText, "\n", "\n"+strings.Repeat(" ", lipgloss.Width(prefix)))
+		
+		m.logBuffer += prefix + styleSystemOutput.Render(indentedText) + "\n"
+		m.viewport.SetContent(m.logBuffer)
 		m.viewport.GotoBottom()
 
 	case TickMsg:
@@ -135,6 +207,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	return m, tea.Batch(tiCmd, vpCmd)
+}
+
+// autocompleteCommand attempts to complete the current input
+func (m *Model) autocompleteCommand() {
+	input := m.textInput.Value()
+	commands := []string{"/run", "/validate", "/status", "/history", "/wizard", "/logs", "/clear", "/quit", "/help"}
+	
+	for _, cmd := range commands {
+		if strings.HasPrefix(cmd, input) {
+			m.textInput.SetValue(cmd)
+			// Move cursor to end
+			m.textInput.SetCursor(len(cmd))
+			return
+		}
+	}
 }
 
 // View renders the TUI
@@ -165,6 +252,10 @@ func (m Model) statusBarView() string {
 
 	// Calculate remaining width for spacer
 	usedWidth := w(dir) + w(branch) + w(status)
+	if usedWidth > m.width {
+		usedWidth = m.width
+	}
+	
 	spacer := styleStatusBar.
 		Width(m.width - usedWidth).
 		Render("")
@@ -179,15 +270,28 @@ func (m Model) statusBarView() string {
 
 func (m Model) welcomeMessage() string {
 	logo := `
-   MSSQL-PG-MIGRATE
-   Interative Shell
+  __  __  _____  _____  _____ _       
+ |  \/  |/ ____|/ ____|/ ____| |      
+ | \  / | (___ | (___ | |  __| |      
+ | |\/| |\___ \ \___ \ | | |_ | |      
+ | |  | |____) |____) | |__| | |____  
+ |_|  |_|_____/|_____/ \_____|______| 
+  PG-MIGRATE INTERACTIVE SHELL
 `
-	help := `
-   Type /help to see available commands.
-   Type /run to start migration (uses config.yaml).
-   Type /quit to exit.
+	
+	welcome := styleTitle.Render(logo)
+	
+	body := `
+ Welcome to the migration engine. This tool allows you to
+ safely and efficiently move data between SQL Server and 
+ PostgreSQL.
+ 
+ Type /help to see available commands.
 `
-	return styleTitle.Render(logo) + help
+	
+tips := lipgloss.NewStyle().Foreground(colorGray).Render("\n Tip: You can resume an interrupted migration with /run.")
+
+	return welcome + body + tips
 }
 
 func (m Model) handleCommand(cmdStr string) tea.Cmd {
@@ -203,20 +307,40 @@ func (m Model) handleCommand(cmdStr string) tea.Cmd {
 		return tea.Quit
 
 	case "/clear":
-		m.viewport.SetContent(m.welcomeMessage())
+		m.logBuffer = m.welcomeMessage()
+		m.viewport.SetContent(m.logBuffer)
 		return nil
 
 	case "/help":
 		help := `
 Available Commands:
+  /wizard               Launch the configuration wizard
   /run [config_file]    Start migration (default: config.yaml)
   /validate             Validate migration
   /status               Show migration status
   /history              Show migration history
+  /logs                 Save session logs to a file for analysis
   /clear                Clear screen
   /quit                 Exit application
 `
 		return func() tea.Msg { return OutputMsg(help) }
+
+	case "/logs":
+		logFile := "session.log"
+		err := os.WriteFile(logFile, []byte(m.logBuffer), 0644)
+		if err != nil {
+			return func() tea.Msg { return OutputMsg(fmt.Sprintf("Error saving logs: %v\n", err)) }
+		}
+		return func() tea.Msg { return OutputMsg(fmt.Sprintf("Logs saved to %s\n", logFile)) }
+
+	case "/wizard":
+		m.mode = modeWizard
+		m.step = stepSourceType
+		m.textInput.Reset()
+		m.textInput.Placeholder = ""
+		m.logBuffer += "\n--- CONFIGURATION WIZARD ---\n"
+		m.viewport.SetContent(m.logBuffer)
+		return m.handleWizardStep("")
 
 	case "/run":
 		configFile := "config.yaml"
@@ -258,6 +382,11 @@ func (m Model) runMigrationCmd(configFile string) tea.Cmd {
 		// Output to the view
 		out := fmt.Sprintf("Running migration with config: %s\n", configFile)
 		
+		// Check file existence first for better error
+		if _, err := os.Stat(configFile); os.IsNotExist(err) {
+			return OutputMsg(out + "Config file not found. Run /wizard to create one.\n")
+		}
+
 		// Load config
 		cfg, err := config.Load(configFile)
 		if err != nil {
@@ -283,6 +412,9 @@ func (m Model) runMigrationCmd(configFile string) tea.Cmd {
 func (m Model) runValidateCmd(configFile string) tea.Cmd {
 	return func() tea.Msg {
 		out := fmt.Sprintf("Validating with config: %s\n", configFile)
+		if _, err := os.Stat(configFile); os.IsNotExist(err) {
+			return OutputMsg(out + "Config file not found. Run /wizard to create one.\n")
+		}
 		cfg, err := config.Load(configFile)
 		if err != nil {
 			return OutputMsg(out + fmt.Sprintf("Error: %v\n", err))
@@ -302,6 +434,9 @@ func (m Model) runValidateCmd(configFile string) tea.Cmd {
 
 func (m Model) runStatusCmd(configFile string) tea.Cmd {
 	return func() tea.Msg {
+		if _, err := os.Stat(configFile); os.IsNotExist(err) {
+			return OutputMsg("Config file not found. Run /wizard to create one.\n")
+		}
 		cfg, err := config.Load(configFile)
 		if err != nil {
 			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
@@ -313,8 +448,6 @@ func (m Model) runStatusCmd(configFile string) tea.Cmd {
 		defer orch.Close()
 
 		// Capture stdout for ShowStatus
-		// This is tricky because ShowStatus prints to stdout directly.
-		// Since we have hooked stdout in main.go, this should work automatically!
 		if err := orch.ShowStatus(); err != nil {
 			return OutputMsg(fmt.Sprintf("Error showing status: %v\n", err))
 		}
@@ -324,6 +457,9 @@ func (m Model) runStatusCmd(configFile string) tea.Cmd {
 
 func (m Model) runHistoryCmd(configFile string) tea.Cmd {
 	return func() tea.Msg {
+		if _, err := os.Stat(configFile); os.IsNotExist(err) {
+			return OutputMsg("Config file not found. Run /wizard to create one.\n")
+		}
 		cfg, err := config.Load(configFile)
 		if err != nil {
 			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
@@ -341,10 +477,191 @@ func (m Model) runHistoryCmd(configFile string) tea.Cmd {
 	}
 }
 
+func (m *Model) handleWizardStep(input string) tea.Cmd {
+	if input != "" {
+		m.logBuffer += styleUserInput.Render("> " + input) + "\n"
+		m.viewport.SetContent(m.logBuffer)
+		m.textInput.Reset()
+	}
+
+	// Capture input for current step before moving to next
+	switch m.step {
+	case stepSourceType:
+		if input != "" {
+			m.wizardData.Source.Type = input
+			m.step = stepSourceHost
+		}
+	case stepSourceHost:
+		if input != "" {
+			m.wizardData.Source.Host = input
+			m.step = stepSourcePort
+		}
+	case stepSourcePort:
+		if input != "" {
+			fmt.Sscanf(input, "%d", &m.wizardData.Source.Port)
+			m.step = stepSourceDB
+		}
+	case stepSourceDB:
+		if input != "" {
+			m.wizardData.Source.Database = input
+			m.step = stepSourceUser
+		}
+	case stepSourceUser:
+		if input != "" {
+			m.wizardData.Source.User = input
+			m.step = stepSourcePass
+		}
+	case stepSourcePass:
+		if input != "" {
+			m.wizardData.Source.Password = input
+			m.step = stepSourceSSL
+			m.textInput.EchoMode = textinput.EchoNormal
+		}
+	case stepSourceSSL:
+		if input != "" {
+			if m.wizardData.Source.Type == "postgres" {
+				m.wizardData.Source.SSLMode = input
+			} else {
+				if strings.ToLower(input) == "y" || strings.ToLower(input) == "yes" || strings.ToLower(input) == "true" {
+					m.wizardData.Source.TrustServerCert = true
+				}
+			}
+			m.step = stepTargetType
+		}
+	case stepTargetType:
+		if input != "" {
+			m.wizardData.Target.Type = input
+			m.step = stepTargetHost
+		}
+	case stepTargetHost:
+		if input != "" {
+			m.wizardData.Target.Host = input
+			m.step = stepTargetPort
+		}
+	case stepTargetPort:
+		if input != "" {
+			fmt.Sscanf(input, "%d", &m.wizardData.Target.Port)
+			m.step = stepTargetDB
+		}
+	case stepTargetDB:
+		if input != "" {
+			m.wizardData.Target.Database = input
+			m.step = stepTargetUser
+		}
+	case stepTargetUser:
+		if input != "" {
+			m.wizardData.Target.User = input
+			m.step = stepTargetPass
+		}
+	case stepTargetPass:
+		if input != "" {
+			m.wizardData.Target.Password = input
+			m.step = stepTargetSSL
+			m.textInput.EchoMode = textinput.EchoNormal
+		}
+	case stepTargetSSL:
+		if input != "" {
+			if m.wizardData.Target.Type == "postgres" {
+				m.wizardData.Target.SSLMode = input
+			} else {
+				if strings.ToLower(input) == "y" || strings.ToLower(input) == "yes" || strings.ToLower(input) == "true" {
+					m.wizardData.Target.TrustServerCert = true
+				}
+			}
+			m.step = stepWorkers
+		}
+	case stepWorkers:
+		if input != "" {
+			fmt.Sscanf(input, "%d", &m.wizardData.Migration.Workers)
+			return m.finishWizard()
+		}
+	}
+
+	// Display prompt for current (new) step
+	var prompt string
+	switch m.step {
+	case stepSourceType:
+		prompt = "Source Type (mssql/postgres) [mssql]: "
+	case stepSourceHost:
+		prompt = "Source Host: "
+	case stepSourcePort:
+		prompt = "Source Port [1433/5432]: "
+	case stepSourceDB:
+		prompt = "Source Database: "
+	case stepSourceUser:
+		prompt = "Source User: "
+	case stepSourcePass:
+		prompt = "Source Password: "
+		m.textInput.EchoMode = textinput.EchoPassword
+	case stepSourceSSL:
+		if m.wizardData.Source.Type == "postgres" {
+			prompt = "Source SSL Mode (disable/require/verify-ca/verify-full) [require]: "
+		} else {
+			prompt = "Trust Source Server Certificate? (y/n) [n]: "
+		}
+	case stepTargetType:
+		prompt = "Target Type (postgres/mssql) [postgres]: "
+	case stepTargetHost:
+		prompt = "Target Host: "
+	case stepTargetPort:
+		prompt = "Target Port [5432/1433]: "
+	case stepTargetDB:
+		prompt = "Target Database: "
+	case stepTargetUser:
+		prompt = "Target User: "
+	case stepTargetPass:
+		prompt = "Target Password: "
+		m.textInput.EchoMode = textinput.EchoPassword
+	case stepTargetSSL:
+		if m.wizardData.Target.Type == "postgres" {
+			prompt = "Target SSL Mode (disable/require/verify-ca/verify-full) [require]: "
+		} else {
+			prompt = "Trust Target Server Certificate? (y/n) [n]: "
+		}
+	case stepWorkers:
+		prompt = "Parallel Workers [8]: "
+	}
+
+	m.logBuffer += prompt
+	m.viewport.SetContent(m.logBuffer)
+	m.viewport.GotoBottom()
+	return nil
+}
+
+func (m *Model) finishWizard() tea.Cmd {
+	return func() tea.Msg {
+		// Set some sensible defaults if missed
+		if m.wizardData.Source.Type == "" {
+			m.wizardData.Source.Type = "mssql"
+		}
+		if m.wizardData.Target.Type == "" {
+			m.wizardData.Target.Type = "postgres"
+		}
+		if m.wizardData.Migration.Workers == 0 {
+			m.wizardData.Migration.Workers = 8
+		}
+
+		data, err := yaml.Marshal(m.wizardData)
+		if err != nil {
+			m.mode = modeNormal
+			return OutputMsg(fmt.Sprintf("\nError generating config: %v\n", err))
+		}
+
+		// Write to file
+		if err := os.WriteFile("config.yaml", data, 0600); err != nil {
+			m.mode = modeNormal
+			return OutputMsg(fmt.Sprintf("\nError saving config.yaml: %v\n", err))
+		}
+
+		m.mode = modeNormal
+		return OutputMsg("\nConfiguration saved to config.yaml!\nYou can now run the migration with /run.\n")
+	}
+}
+
 // Start launches the TUI program
 func Start() error {
 	m := InitialModel()
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	// Start output capture
 	cleanup := CaptureOutput(p)

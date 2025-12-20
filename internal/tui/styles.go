@@ -61,4 +61,19 @@ var (
 	stylePrompt = lipgloss.NewStyle().
 			Foreground(colorPurple).
 			Bold(true)
+
+	styleError = lipgloss.NewStyle().
+			Foreground(colorRed).
+			Bold(true)
+
+	styleSuccess = lipgloss.NewStyle().
+			Foreground(colorGreen).
+			Bold(true)
+			
+	styleUserInput = lipgloss.NewStyle().
+			Foreground(colorBlue).
+			Bold(true)
+			
+	styleSystemOutput = lipgloss.NewStyle().
+			Foreground(colorLightGray)
 )
