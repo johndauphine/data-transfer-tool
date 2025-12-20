@@ -337,6 +337,21 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	// Track jobs per table for completion tracking
 	tableJobs := make(map[string]int) // tableName -> number of jobs
 
+	// Count tables that need partitioning
+	var largeKeysetTables, largeRowNumTables int
+	for _, t := range tables {
+		if t.IsLarge(o.config.Migration.LargeTableThreshold) {
+			if t.SupportsKeysetPagination() {
+				largeKeysetTables++
+			} else if t.HasPK() {
+				largeRowNumTables++
+			}
+		}
+	}
+	if largeKeysetTables > 0 || largeRowNumTables > 0 {
+		fmt.Printf("Calculating partitions for %d large tables...\n", largeKeysetTables+largeRowNumTables)
+	}
+
 	for _, t := range tables {
 		if t.IsLarge(o.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination() {
 			// Partition large tables with keyset pagination (PK-based boundaries)
@@ -345,6 +360,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				o.config.Migration.MaxPartitions,
 			)
 
+			fmt.Printf("  Partitioning %s (%d rows, %d partitions)...\n", t.Name, t.RowCount, numPartitions)
 			partitions, err := o.sourcePool.GetPartitionBoundaries(ctx, &t, numPartitions)
 			if err != nil {
 				return fmt.Errorf("partitioning %s: %w", t.FullName(), err)
@@ -373,6 +389,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				numPartitions = 1
 			}
 
+			fmt.Printf("  Partitioning %s (%d rows, %d partitions, row-number)...\n", t.Name, t.RowCount, numPartitions)
 			rowsPerPartition := t.RowCount / int64(numPartitions)
 			tableJobs[t.Name] = numPartitions
 

@@ -49,6 +49,13 @@ func (t *Tracker) Add(n int64) {
 	}
 }
 
+// SetTable updates the progress bar description with the current table name
+func (t *Tracker) SetTable(tableName string) {
+	if t.bar != nil {
+		t.bar.Describe(fmt.Sprintf("Transferring %s", tableName))
+	}
+}
+
 // Current returns the current count
 func (t *Tracker) Current() int64 {
 	return t.current.Load()

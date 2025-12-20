@@ -196,6 +196,9 @@ func Execute(
 	job Job,
 	prog *progress.Tracker,
 ) (*TransferStats, error) {
+	// Update progress bar with current table name
+	prog.SetTable(job.Table.Name)
+
 	// Check for saved progress (chunk-level resume)
 	var resumeLastPK any
 	var resumeRowsDone int64
