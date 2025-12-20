@@ -64,6 +64,13 @@ type SourceConfig struct {
 	SSLMode         string `yaml:"ssl_mode"`          // PostgreSQL: disable, require, verify-ca, verify-full (default: require)
 	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
 	Encrypt         string `yaml:"encrypt"`           // MSSQL: disable, false, true (default: true)
+	// Kerberos authentication (alternative to user/password)
+	Auth       string `yaml:"auth"`        // "password" (default) or "kerberos"
+	Krb5Conf   string `yaml:"krb5_conf"`   // Path to krb5.conf (optional, uses system default)
+	Keytab     string `yaml:"keytab"`      // Path to keytab file (optional, uses credential cache)
+	Realm      string `yaml:"realm"`       // Kerberos realm (optional, auto-detected)
+	SPN        string `yaml:"spn"`         // Service Principal Name for MSSQL (optional)
+	GSSEncMode string `yaml:"gssencmode"`  // PostgreSQL GSSAPI encryption: disable, prefer, require (default: prefer)
 }
 
 // TargetConfig holds target database connection settings
@@ -78,6 +85,13 @@ type TargetConfig struct {
 	SSLMode         string `yaml:"ssl_mode"`          // PostgreSQL: disable, require, verify-ca, verify-full (default: require)
 	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
 	Encrypt         string `yaml:"encrypt"`           // MSSQL: disable, false, true (default: true)
+	// Kerberos authentication (alternative to user/password)
+	Auth       string `yaml:"auth"`        // "password" (default) or "kerberos"
+	Krb5Conf   string `yaml:"krb5_conf"`   // Path to krb5.conf (optional, uses system default)
+	Keytab     string `yaml:"keytab"`      // Path to keytab file (optional, uses credential cache)
+	Realm      string `yaml:"realm"`       // Kerberos realm (optional, auto-detected)
+	SPN        string `yaml:"spn"`         // Service Principal Name for MSSQL (optional)
+	GSSEncMode string `yaml:"gssencmode"`  // PostgreSQL GSSAPI encryption: disable, prefer, require (default: prefer)
 }
 
 // MigrationConfig holds migration behavior settings
@@ -319,31 +333,90 @@ func (c *Config) validate() error {
 // SourceDSN returns the source database connection string
 func (c *Config) SourceDSN() string {
 	if c.Source.Type == "postgres" {
-		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-			c.Source.User, c.Source.Password, c.Source.Host, c.Source.Port, c.Source.Database, c.Source.SSLMode)
+		return c.buildPostgresDSN(c.Source.Host, c.Source.Port, c.Source.Database,
+			c.Source.User, c.Source.Password, c.Source.SSLMode,
+			c.Source.Auth, c.Source.GSSEncMode)
 	}
 	// Default: MSSQL
-	trustCert := "false"
-	if c.Source.TrustServerCert {
-		trustCert = "true"
-	}
-	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
-		c.Source.User, c.Source.Password, c.Source.Host, c.Source.Port, c.Source.Database, c.Source.Encrypt, trustCert)
+	return c.buildMSSQLDSN(c.Source.Host, c.Source.Port, c.Source.Database,
+		c.Source.User, c.Source.Password, c.Source.Encrypt, c.Source.TrustServerCert,
+		c.Source.Auth, c.Source.Krb5Conf, c.Source.Keytab, c.Source.Realm, c.Source.SPN)
 }
 
 // TargetDSN returns the target database connection string
 func (c *Config) TargetDSN() string {
 	if c.Target.Type == "mssql" {
-		trustCert := "false"
-		if c.Target.TrustServerCert {
-			trustCert = "true"
-		}
-		return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
-			c.Target.User, c.Target.Password, c.Target.Host, c.Target.Port, c.Target.Database, c.Target.Encrypt, trustCert)
+		return c.buildMSSQLDSN(c.Target.Host, c.Target.Port, c.Target.Database,
+			c.Target.User, c.Target.Password, c.Target.Encrypt, c.Target.TrustServerCert,
+			c.Target.Auth, c.Target.Krb5Conf, c.Target.Keytab, c.Target.Realm, c.Target.SPN)
 	}
 	// Default: PostgreSQL
+	return c.buildPostgresDSN(c.Target.Host, c.Target.Port, c.Target.Database,
+		c.Target.User, c.Target.Password, c.Target.SSLMode,
+		c.Target.Auth, c.Target.GSSEncMode)
+}
+
+// buildMSSQLDSN builds an MSSQL connection string with optional Kerberos auth
+func (c *Config) buildMSSQLDSN(host string, port int, database, user, password, encrypt string,
+	trustServerCert bool, auth, krb5Conf, keytab, realm, spn string) string {
+
+	trustCert := "false"
+	if trustServerCert {
+		trustCert = "true"
+	}
+
+	// Kerberos authentication
+	if auth == "kerberos" {
+		dsn := fmt.Sprintf("sqlserver://%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s&authenticator=krb5",
+			host, port, database, encrypt, trustCert)
+
+		// Optional Kerberos parameters
+		if krb5Conf != "" {
+			dsn += "&krb5-configfile=" + krb5Conf
+		}
+		if keytab != "" {
+			dsn += "&krb5-keytabfile=" + keytab
+		}
+		if realm != "" {
+			dsn += "&krb5-realm=" + realm
+		}
+		if spn != "" {
+			dsn += "&ServerSPN=" + spn
+		}
+		// If user specified, use it as the principal
+		if user != "" {
+			dsn += "&krb5-username=" + user
+		}
+		return dsn
+	}
+
+	// Password authentication (default)
+	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
+		user, password, host, port, database, encrypt, trustCert)
+}
+
+// buildPostgresDSN builds a PostgreSQL connection string with optional Kerberos auth
+func (c *Config) buildPostgresDSN(host string, port int, database, user, password, sslMode,
+	auth, gssEncMode string) string {
+
+	// Kerberos/GSSAPI authentication
+	if auth == "kerberos" {
+		gssEnc := "prefer"
+		if gssEncMode != "" {
+			gssEnc = gssEncMode
+		}
+		// For Kerberos, we don't include password in the DSN
+		if user != "" {
+			return fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=%s&gssencmode=%s",
+				user, host, port, database, sslMode, gssEnc)
+		}
+		return fmt.Sprintf("postgres://%s:%d/%s?sslmode=%s&gssencmode=%s",
+			host, port, database, sslMode, gssEnc)
+	}
+
+	// Password authentication (default)
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		c.Target.User, c.Target.Password, c.Target.Host, c.Target.Port, c.Target.Database, c.Target.SSLMode)
+		user, password, host, port, database, sslMode)
 }
 
 // Sanitized returns a copy of the config with sensitive fields redacted

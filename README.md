@@ -188,6 +188,13 @@ source:
   ssl_mode: require           # PostgreSQL: disable, require, verify-ca, verify-full (default: require)
   encrypt: "true"             # MSSQL: disable, false, true (default: true)
   trust_server_cert: false    # MSSQL: trust server certificate without validation (default: false)
+  # Kerberos authentication (alternative to user/password)
+  auth: password              # "password" (default) or "kerberos"
+  # krb5_conf: /etc/krb5.conf # Path to krb5.conf (optional)
+  # keytab: /path/to/keytab   # Path to keytab file (optional)
+  # realm: EXAMPLE.COM        # Kerberos realm (optional)
+  # spn: MSSQLSvc/host:1433   # Service Principal Name for MSSQL (optional)
+  # gssencmode: prefer        # PostgreSQL GSSAPI encryption: disable, prefer, require
 
 target:
   type: postgres              # "postgres" (default) or "mssql"
@@ -252,6 +259,71 @@ slack:
   webhook_url: ${SLACK_WEBHOOK_URL}
   channel: "#data-engineering"
   username: mssql-pg-migrate
+```
+
+## Kerberos Authentication
+
+For enterprise environments, Kerberos authentication eliminates the need to store database passwords. Both SQL Server and PostgreSQL support Kerberos.
+
+### SQL Server with Kerberos
+
+```yaml
+source:
+  type: mssql
+  host: sqlserver.example.com
+  database: MyDatabase
+  auth: kerberos
+  user: svc_migrate@EXAMPLE.COM   # Kerberos principal (optional)
+  # spn: MSSQLSvc/sqlserver.example.com:1433  # Auto-detected if not specified
+  encrypt: "true"
+```
+
+**Requirements:**
+- Linux: Install `krb5-user`, configure `/etc/krb5.conf`, run `kinit` or use a keytab
+- Windows: Domain-joined machine with logged-in domain user
+- macOS: Configure Kerberos in System Preferences
+
+**Using a keytab (for service accounts):**
+```yaml
+source:
+  type: mssql
+  host: sqlserver.example.com
+  database: MyDatabase
+  auth: kerberos
+  user: svc_migrate@EXAMPLE.COM
+  keytab: /etc/krb5.keytab
+  realm: EXAMPLE.COM
+```
+
+### PostgreSQL with Kerberos (GSSAPI)
+
+```yaml
+target:
+  type: postgres
+  host: postgres.example.com
+  database: mydb
+  auth: kerberos
+  user: svc_migrate@EXAMPLE.COM
+  gssencmode: require   # disable, prefer (default), require
+  ssl_mode: disable     # SSL not needed when using GSSAPI encryption
+```
+
+### Kerberos Setup (Linux)
+
+```bash
+# Install Kerberos client
+sudo apt install krb5-user   # Debian/Ubuntu
+sudo yum install krb5-workstation  # RHEL/CentOS
+
+# Configure /etc/krb5.conf with your realm
+# Then authenticate:
+kinit svc_migrate@EXAMPLE.COM
+
+# Verify ticket
+klist
+
+# Run migration (no password needed)
+./mssql-pg-migrate -c config.yaml run
 ```
 
 ## Usage
