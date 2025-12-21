@@ -46,6 +46,8 @@ type Orchestrator struct {
 	progress   *progress.Tracker
 	notifier   *notify.Notifier
 	tables     []source.Table
+	runProfile string
+	runConfig  string
 }
 
 // New creates a new orchestrator
@@ -101,6 +103,12 @@ func (o *Orchestrator) Close() {
 	o.state.Close()
 }
 
+// SetRunContext sets metadata for the current run (profile name or config path).
+func (o *Orchestrator) SetRunContext(profileName, configPath string) {
+	o.runProfile = profileName
+	o.runConfig = configPath
+}
+
 // Run executes a new migration
 func (o *Orchestrator) Run(ctx context.Context) error {
 	runID := uuid.New().String()[:8]
@@ -110,7 +118,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	fmt.Printf("Connection pools: source=%d, target=%d\n",
 		o.sourcePool.MaxConns(), o.targetPool.MaxConns())
 
-	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized()); err != nil {
+	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
 		return fmt.Errorf("creating run: %w", err)
 	}
 
@@ -1030,16 +1038,16 @@ func (o *Orchestrator) ShowHistory() error {
 		return nil
 	}
 
-	fmt.Printf("%-10s %-20s %-20s %-10s\n", "ID", "Started", "Completed", "Status")
-	fmt.Println("--------------------------------------------------------------")
+	fmt.Printf("%-10s %-20s %-20s %-10s %-30s\n", "ID", "Started", "Completed", "Status", "Origin")
+	fmt.Println("--------------------------------------------------------------------------------------")
 
 	for _, r := range runs {
 		completed := "-"
 		if r.CompletedAt != nil {
 			completed = r.CompletedAt.Format("2006-01-02 15:04:05")
 		}
-		fmt.Printf("%-10s %-20s %-20s %-10s\n",
-			r.ID, r.StartedAt.Format("2006-01-02 15:04:05"), completed, r.Status)
+		fmt.Printf("%-10s %-20s %-20s %-10s %-30s\n",
+			r.ID, r.StartedAt.Format("2006-01-02 15:04:05"), completed, r.Status, runOrigin(&r))
 	}
 
 	fmt.Println("\nUse 'history --run <ID>' to view run configuration")
@@ -1066,6 +1074,9 @@ func (o *Orchestrator) ShowRunDetails(runID string) error {
 	}
 	fmt.Printf("Source Schema: %s\n", run.SourceSchema)
 	fmt.Printf("Target Schema: %s\n", run.TargetSchema)
+	if origin := runOrigin(run); origin != "" {
+		fmt.Printf("Origin:        %s\n", origin)
+	}
 
 	// Task stats
 	total, pending, running, success, failed, err := o.state.GetRunStats(run.ID)
@@ -1104,6 +1115,19 @@ func max(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+func runOrigin(r *checkpoint.Run) string {
+	if r == nil {
+		return ""
+	}
+	if r.ProfileName != "" {
+		return "profile:" + r.ProfileName
+	}
+	if r.ConfigPath != "" {
+		return "config:" + r.ConfigPath
+	}
+	return ""
 }
 
 // Unused import suppression

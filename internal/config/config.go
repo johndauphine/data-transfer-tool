@@ -54,7 +54,7 @@ type SlackConfig struct {
 
 // SourceConfig holds source database connection settings
 type SourceConfig struct {
-	Type            string `yaml:"type"`              // "mssql" or "postgres" (default: mssql)
+	Type            string `yaml:"type"` // "mssql" or "postgres" (default: mssql)
 	Host            string `yaml:"host"`
 	Port            int    `yaml:"port"`
 	Database        string `yaml:"database"`
@@ -65,17 +65,17 @@ type SourceConfig struct {
 	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
 	Encrypt         string `yaml:"encrypt"`           // MSSQL: disable, false, true (default: true)
 	// Kerberos authentication (alternative to user/password)
-	Auth       string `yaml:"auth"`        // "password" (default) or "kerberos"
-	Krb5Conf   string `yaml:"krb5_conf"`   // Path to krb5.conf (optional, uses system default)
-	Keytab     string `yaml:"keytab"`      // Path to keytab file (optional, uses credential cache)
-	Realm      string `yaml:"realm"`       // Kerberos realm (optional, auto-detected)
-	SPN        string `yaml:"spn"`         // Service Principal Name for MSSQL (optional)
-	GSSEncMode string `yaml:"gssencmode"`  // PostgreSQL GSSAPI encryption: disable, prefer, require (default: prefer)
+	Auth       string `yaml:"auth"`       // "password" (default) or "kerberos"
+	Krb5Conf   string `yaml:"krb5_conf"`  // Path to krb5.conf (optional, uses system default)
+	Keytab     string `yaml:"keytab"`     // Path to keytab file (optional, uses credential cache)
+	Realm      string `yaml:"realm"`      // Kerberos realm (optional, auto-detected)
+	SPN        string `yaml:"spn"`        // Service Principal Name for MSSQL (optional)
+	GSSEncMode string `yaml:"gssencmode"` // PostgreSQL GSSAPI encryption: disable, prefer, require (default: prefer)
 }
 
 // TargetConfig holds target database connection settings
 type TargetConfig struct {
-	Type            string `yaml:"type"`              // "postgres" or "mssql" (default: postgres)
+	Type            string `yaml:"type"` // "postgres" or "mssql" (default: postgres)
 	Host            string `yaml:"host"`
 	Port            int    `yaml:"port"`
 	Database        string `yaml:"database"`
@@ -86,25 +86,25 @@ type TargetConfig struct {
 	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
 	Encrypt         string `yaml:"encrypt"`           // MSSQL: disable, false, true (default: true)
 	// Kerberos authentication (alternative to user/password)
-	Auth       string `yaml:"auth"`        // "password" (default) or "kerberos"
-	Krb5Conf   string `yaml:"krb5_conf"`   // Path to krb5.conf (optional, uses system default)
-	Keytab     string `yaml:"keytab"`      // Path to keytab file (optional, uses credential cache)
-	Realm      string `yaml:"realm"`       // Kerberos realm (optional, auto-detected)
-	SPN        string `yaml:"spn"`         // Service Principal Name for MSSQL (optional)
-	GSSEncMode string `yaml:"gssencmode"`  // PostgreSQL GSSAPI encryption: disable, prefer, require (default: prefer)
+	Auth       string `yaml:"auth"`       // "password" (default) or "kerberos"
+	Krb5Conf   string `yaml:"krb5_conf"`  // Path to krb5.conf (optional, uses system default)
+	Keytab     string `yaml:"keytab"`     // Path to keytab file (optional, uses credential cache)
+	Realm      string `yaml:"realm"`      // Kerberos realm (optional, auto-detected)
+	SPN        string `yaml:"spn"`        // Service Principal Name for MSSQL (optional)
+	GSSEncMode string `yaml:"gssencmode"` // PostgreSQL GSSAPI encryption: disable, prefer, require (default: prefer)
 }
 
 // MigrationConfig holds migration behavior settings
 type MigrationConfig struct {
-	MaxConnections         int      `yaml:"max_connections"`          // Deprecated: use max_mssql_connections and max_pg_connections
-	MaxMssqlConnections    int      `yaml:"max_mssql_connections"`    // Max SQL Server connections
-	MaxPgConnections       int      `yaml:"max_pg_connections"`       // Max PostgreSQL connections
+	MaxConnections         int      `yaml:"max_connections"`       // Deprecated: use max_mssql_connections and max_pg_connections
+	MaxMssqlConnections    int      `yaml:"max_mssql_connections"` // Max SQL Server connections
+	MaxPgConnections       int      `yaml:"max_pg_connections"`    // Max PostgreSQL connections
 	ChunkSize              int      `yaml:"chunk_size"`
 	MaxPartitions          int      `yaml:"max_partitions"`
 	Workers                int      `yaml:"workers"`
 	LargeTableThreshold    int64    `yaml:"large_table_threshold"`
-	IncludeTables          []string `yaml:"include_tables"`           // Only migrate these tables (glob patterns)
-	ExcludeTables          []string `yaml:"exclude_tables"`           // Skip these tables (glob patterns)
+	IncludeTables          []string `yaml:"include_tables"` // Only migrate these tables (glob patterns)
+	ExcludeTables          []string `yaml:"exclude_tables"` // Skip these tables (glob patterns)
 	DataDir                string   `yaml:"data_dir"`
 	TargetMode             string   `yaml:"target_mode"`              // "drop_recreate" (default) or "truncate"
 	StrictConsistency      bool     `yaml:"strict_consistency"`       // Use table locks instead of NOLOCK
@@ -129,12 +129,17 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("reading config file: %w", err)
 	}
 
+	return LoadBytes(data)
+}
+
+// LoadBytes reads configuration from YAML bytes.
+func LoadBytes(data []byte) (*Config, error) {
 	// Expand environment variables
 	expanded := os.ExpandEnv(string(data))
 
 	var cfg Config
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config file: %w", err)
+		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
 	// Apply defaults
@@ -146,6 +151,22 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// DefaultDataDir returns the default data directory for state storage.
+func DefaultDataDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".mssql-pg-migrate")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 func (c *Config) applyDefaults() {

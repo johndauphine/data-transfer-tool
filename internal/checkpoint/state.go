@@ -42,6 +42,8 @@ type Run struct {
 	SourceSchema string
 	TargetSchema string
 	Config       string
+	ProfileName  string
+	ConfigPath   string
 }
 
 // TransferProgress tracks chunk-level progress
@@ -98,7 +100,9 @@ func (s *State) migrate() error {
 		status TEXT NOT NULL DEFAULT 'running',
 		source_schema TEXT NOT NULL,
 		target_schema TEXT NOT NULL,
-		config TEXT
+		config TEXT,
+		profile_name TEXT,
+		config_path TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS tasks (
@@ -132,6 +136,13 @@ func (s *State) migrate() error {
 		updated_at TEXT
 	);
 
+	CREATE TABLE IF NOT EXISTS profiles (
+		name TEXT PRIMARY KEY,
+		config_enc BLOB NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_tasks_run_status ON tasks(run_id, status);
 	CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);
 	`
@@ -140,8 +151,65 @@ func (s *State) migrate() error {
 		return err
 	}
 
+	if err := s.ensureRunColumns(); err != nil {
+		return err
+	}
+
 	// One-time migration: sanitize any passwords stored in config column
 	return s.sanitizeStoredConfigs()
+}
+
+func (s *State) ensureRunColumns() error {
+	columns, err := s.tableColumns("runs")
+	if err != nil {
+		return err
+	}
+
+	needsProfile := true
+	needsConfigPath := true
+	for _, col := range columns {
+		switch col {
+		case "profile_name":
+			needsProfile = false
+		case "config_path":
+			needsConfigPath = false
+		}
+	}
+
+	if needsProfile {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN profile_name TEXT`); err != nil {
+			return err
+		}
+	}
+	if needsConfigPath {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN config_path TEXT`); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *State) tableColumns(table string) ([]string, error) {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var cols []string
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dfltValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return nil, err
+		}
+		cols = append(cols, name)
+	}
+	return cols, rows.Err()
 }
 
 // sanitizeStoredConfigs removes any passwords accidentally stored in config JSON
@@ -214,12 +282,12 @@ func (s *State) Close() error {
 }
 
 // CreateRun creates a new migration run
-func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any) error {
+func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error {
 	configJSON, _ := json.Marshal(config)
 	_, err := s.db.Exec(`
-		INSERT INTO runs (id, started_at, status, source_schema, target_schema, config)
-		VALUES (?, datetime('now'), 'running', ?, ?, ?)
-	`, id, sourceSchema, targetSchema, string(configJSON))
+		INSERT INTO runs (id, started_at, status, source_schema, target_schema, config, profile_name, config_path)
+		VALUES (?, datetime('now'), 'running', ?, ?, ?, ?, ?)
+	`, id, sourceSchema, targetSchema, string(configJSON), profileName, configPath)
 	return err
 }
 
@@ -237,10 +305,10 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 	var r Run
 	var startedAtStr string
 	err := s.db.QueryRow(`
-		SELECT id, started_at, status, source_schema, target_schema
+		SELECT id, started_at, status, source_schema, target_schema, profile_name, config_path
 		FROM runs WHERE status = 'running'
 		ORDER BY started_at DESC LIMIT 1
-	`).Scan(&r.ID, &startedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema)
+	`).Scan(&r.ID, &startedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &r.ProfileName, &r.ConfigPath)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -456,7 +524,7 @@ func (p *ProgressSaver) GetProgress(taskID int64) (lastPK any, rowsDone int64, e
 // GetAllRuns returns all runs for history
 func (s *State) GetAllRuns() ([]Run, error) {
 	rows, err := s.db.Query(`
-		SELECT id, started_at, completed_at, status, source_schema, target_schema, config
+		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path
 		FROM runs ORDER BY started_at DESC LIMIT 20
 	`)
 	if err != nil {
@@ -470,7 +538,8 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		var startedAtStr string
 		var completedAtStr sql.NullString
 		var configStr sql.NullString
-		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr); err != nil {
+		var profileName, configPath sql.NullString
+		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath); err != nil {
 			return nil, err
 		}
 		r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
@@ -480,6 +549,12 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		}
 		if configStr.Valid {
 			r.Config = configStr.String
+		}
+		if profileName.Valid {
+			r.ProfileName = profileName.String
+		}
+		if configPath.Valid {
+			r.ConfigPath = configPath.String
 		}
 		runs = append(runs, r)
 	}
@@ -493,10 +568,11 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 	var completedAtStr sql.NullString
 	var configStr sql.NullString
 
+	var profileName, configPath sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, started_at, completed_at, status, source_schema, target_schema, config
+		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path
 		FROM runs WHERE id = ?
-	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr)
+	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -512,6 +588,12 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 	}
 	if configStr.Valid {
 		r.Config = configStr.String
+	}
+	if profileName.Valid {
+		r.ProfileName = profileName.String
+	}
+	if configPath.Valid {
+		r.ConfigPath = configPath.String
 	}
 	return &r, nil
 }

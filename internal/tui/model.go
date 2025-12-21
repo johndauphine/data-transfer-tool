@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
 	"gopkg.in/yaml.v3"
@@ -47,21 +48,21 @@ const (
 
 // Model is the main TUI model
 type Model struct {
-	viewport    viewport.Model
-	textInput   textinput.Model
-	ready       bool
-	gitInfo     GitInfo
-	cwd         string
-	err         error
-	width       int
-	height      int
-	history     []string
-	historyIdx  int
-	logBuffer   string // Persistent buffer for logs
-	lineBuffer  string // Buffer for incoming partial lines
-	suggestions []string // Auto-completion suggestions
-	suggestionIdx int    // Currently selected suggestion index
-	lastInput   string   // Last input value to prevent unnecessary suggestion regeneration
+	viewport      viewport.Model
+	textInput     textinput.Model
+	ready         bool
+	gitInfo       GitInfo
+	cwd           string
+	err           error
+	width         int
+	height        int
+	history       []string
+	historyIdx    int
+	logBuffer     string   // Persistent buffer for logs
+	lineBuffer    string   // Buffer for incoming partial lines
+	suggestions   []string // Auto-completion suggestions
+	suggestionIdx int      // Currently selected suggestion index
+	lastInput     string   // Last input value to prevent unnecessary suggestion regeneration
 
 	// Wizard state
 	mode        sessionMode
@@ -83,6 +84,7 @@ var availableCommands = []commandInfo{
 	{"/history", "Show migration history"},
 	{"/wizard", "Launch configuration wizard"},
 	{"/logs", "Save session logs to file"},
+	{"/profile", "Manage encrypted profiles (save/list/delete/export)"},
 	{"/about", "Show application information"},
 	{"/help", "Show available commands"},
 	{"/clear", "Clear screen"},
@@ -165,24 +167,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					selection := m.suggestions[m.suggestionIdx]
 					// Extract actual value (first word) if it contains description
 					completion := strings.Fields(selection)[0]
-					
+
 					input := m.textInput.Value()
-					
+
 					// File completion logic (@)
 					if idx := strings.LastIndex(input, "@"); idx != -1 && (idx == 0 || input[idx-1] == ' ') {
 						newValue := input[:idx+1] + completion
-						
+
 						if newValue == input && msg.Type == tea.KeyEnter {
 							m.suggestions = nil
 							break // Fallthrough
 						}
 						m.textInput.SetValue(newValue)
 						m.textInput.SetCursor(len(newValue))
-					
+
 					} else if strings.HasPrefix(input, "/") {
 						// Command completion logic
 						newValue := completion
-						
+
 						if newValue == input && msg.Type == tea.KeyEnter {
 							m.suggestions = nil
 							break // Fallthrough
@@ -190,7 +192,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.textInput.SetValue(newValue)
 						m.textInput.SetCursor(len(newValue))
 					}
-					
+
 					m.suggestions = nil
 					m.suggestionIdx = 0
 					return m, nil
@@ -213,7 +215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logBuffer += styleUserInput.Render("> "+value) + "\n"
 				m.viewport.SetContent(m.logBuffer)
 				m.viewport.GotoBottom()
-				
+
 				m.textInput.Reset()
 				m.history = append(m.history, value)
 				m.historyIdx = len(m.history)
@@ -260,14 +262,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case WizardFinishedMsg:
 		m.mode = modeNormal
-		
+
 		text := msg.Message
 		if msg.Err != nil {
 			text = styleError.Render("✖ " + msg.Err.Error())
 		} else {
 			text = styleSuccess.Render("✔ " + text)
 		}
-		
+
 		m.logBuffer += "\n" + text + "\n"
 		m.viewport.SetContent(m.logBuffer)
 		m.viewport.GotoBottom()
@@ -294,10 +296,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Apply styling
 			lowerText := strings.ToLower(line)
 			prefix := "  "
-			
-			isError := strings.Contains(lowerText, "error") || 
+
+			isError := strings.Contains(lowerText, "error") ||
 				(strings.Contains(lowerText, "fail") && !strings.Contains(lowerText, "0 failed"))
-				
+
 			if isError {
 				line = styleError.Render(line)
 				prefix = styleError.Render("✖ ")
@@ -311,7 +313,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Append to log
 			m.logBuffer += prefix + line + "\n"
 		}
-		
+
 		// Update viewport
 		m.viewport.SetContent(m.logBuffer)
 		m.viewport.GotoBottom()
@@ -322,13 +324,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	m.textInput, tiCmd = m.textInput.Update(msg)
-	
+
 	// Handle auto-completion suggestions
 	input := m.textInput.Value()
 	if input != m.lastInput {
 		m.lastInput = input
 		m.suggestions = nil // Reset first
-		
+
 		// File completion (@)
 		if idx := strings.LastIndex(input, "@"); idx != -1 {
 			// Only trigger if @ is start of input or preceded by space
@@ -344,7 +346,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.suggestionIdx = 0
 				}
 			}
-		} 
+		}
 		// Command completion (/)
 		if len(m.suggestions) == 0 && strings.HasPrefix(input, "/") {
 			// Find matching commands
@@ -368,7 +370,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			handleViewport = false
 		}
 	}
-	
+
 	if handleViewport {
 		m.viewport, vpCmd = m.viewport.Update(msg)
 	}
@@ -379,7 +381,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // autocompleteCommand attempts to complete the current input
 func (m *Model) autocompleteCommand() {
 	input := m.textInput.Value()
-	
+
 	// File completion
 	if idx := strings.LastIndex(input, "@"); idx != -1 {
 		prefix := input[idx+1:]
@@ -395,8 +397,8 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/run", "/validate", "/status", "/history", "/wizard", "/logs", "/clear", "/quit", "/help"}
-	
+	commands := []string{"/run", "/validate", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
+
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
 			m.textInput.SetValue(cmd)
@@ -405,7 +407,7 @@ func (m *Model) autocompleteCommand() {
 			return
 		}
 	}
-	
+
 	// DEBUG: If no match
 	// m.logBuffer += fmt.Sprintf("No auto-complete match for '%s'\n", input)
 	// m.viewport.SetContent(m.logBuffer)
@@ -421,7 +423,7 @@ func (m Model) View() string {
 	// Viewport height is m.viewport.Height
 	// Total content height is len(strings.Split(m.logBuffer, "\n")) - but wait, wordwrap changes line count.
 	// m.viewport.TotalLineCount() is accurate.
-	
+
 	totalLines := m.viewport.TotalLineCount()
 	visibleLines := m.viewport.Height
 	scrollPercent := 0.0
@@ -454,16 +456,16 @@ func (m Model) View() string {
 	// But changing it here is late.
 	// Let's assume we can overlay it or just append it?
 	// Appending it requires line-by-line join.
-	
+
 	vpLines := strings.Split(m.viewport.View(), "\n")
 	// Pad or truncate vpLines to match visibleLines
 	for len(vpLines) < visibleLines {
 		vpLines = append(vpLines, "")
 	}
-	
+
 	var viewWithBar []string
 	for i := 0; i < visibleLines && i < len(vpLines); i++ {
-		viewWithBar = append(viewWithBar, vpLines[i] + " " + bar[i])
+		viewWithBar = append(viewWithBar, vpLines[i]+" "+bar[i])
 	}
 
 	suggestionsView := ""
@@ -500,9 +502,9 @@ func (m Model) statusBarView() string {
 
 	status := ""
 	if m.gitInfo.Status == "Dirty" {
-		status = styleStatusDirty.Render("Uncommitted Changes") 
+		status = styleStatusDirty.Render("Uncommitted Changes")
 	} else {
-		status = styleStatusClean.Render("All Changes Committed") 
+		status = styleStatusClean.Render("All Changes Committed")
 	}
 
 	// Calculate remaining width for spacer
@@ -510,7 +512,7 @@ func (m Model) statusBarView() string {
 	if usedWidth > m.width {
 		usedWidth = m.width
 	}
-	
+
 	spacer := styleStatusBar.
 		Width(m.width - usedWidth).
 		Render("")
@@ -533,9 +535,9 @@ func (m Model) welcomeMessage() string {
  |_|  |_|_____/|_____/ \_____|______| 
   PG-MIGRATE INTERACTIVE SHELL
 `
-	
+
 	welcome := styleTitle.Render(logo)
-	
+
 	body := `
  Welcome to the migration engine. This tool allows you to
  safely and efficiently move data between SQL Server and 
@@ -543,7 +545,7 @@ func (m Model) welcomeMessage() string {
  
  Type /help to see available commands.
 `
-	
+
 	tips := lipgloss.NewStyle().Foreground(colorGray).Render(`
  Tip: You can resume an interrupted migration with /run.
       Hold Shift to select text with mouse.`)
@@ -557,7 +559,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 	}
 
 	cmd := parts[0]
-	
+
 	// Helper to extract config file from args, supporting @/path/to/file syntax
 	getConfigFile := func(args []string) string {
 		if len(args) > 1 {
@@ -584,9 +586,14 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 Available Commands:
   /wizard               Launch the configuration wizard
   /run [config_file]    Start migration (default: config.yaml)
+  /run --profile NAME   Start migration using a saved profile
   /validate             Validate migration
   /status               Show migration status
   /history              Show migration history
+  /profile save NAME [config_file]   Save an encrypted profile
+  /profile list                      List saved profiles
+  /profile delete NAME               Delete a saved profile
+  /profile export NAME [output_file] Export a profile to a config file
   /logs                 Save session logs to a file for analysis
   /clear                Clear screen
   /quit                 Exit application
@@ -625,10 +632,10 @@ Available Commands:
 		m.step = stepSourceType
 		m.textInput.Reset()
 		m.textInput.Placeholder = ""
-		
+
 		// Determine config file to edit/create
 		m.wizardFile = getConfigFile(parts)
-		
+
 		// Load existing config if available to use as defaults
 		if _, err := os.Stat(m.wizardFile); err == nil {
 			if cfg, err := config.Load(m.wizardFile); err == nil {
@@ -640,7 +647,7 @@ Available Commands:
 		} else {
 			m.logBuffer += fmt.Sprintf("\n--- CONFIGURATION WIZARD: %s ---\n", m.wizardFile)
 		}
-		
+
 		// Display first prompt
 		prompt := m.renderWizardPrompt()
 		m.logBuffer += prompt
@@ -649,25 +656,23 @@ Available Commands:
 		return nil
 
 	case "/run":
-		return m.runMigrationCmd(getConfigFile(parts))
-	
+		configFile, profileName := parseConfigArgs(parts)
+		return m.runMigrationCmd(configFile, profileName)
+
 	case "/validate":
-		return m.runValidateCmd(getConfigFile(parts))
+		configFile, profileName := parseConfigArgs(parts)
+		return m.runValidateCmd(configFile, profileName)
 
 	case "/status":
-		return m.runStatusCmd(getConfigFile(parts))
-		
+		configFile, profileName := parseConfigArgs(parts)
+		return m.runStatusCmd(configFile, profileName)
+
 	case "/history":
-		configFile := "config.yaml"
-		runID := ""
-		if len(parts) > 1 {
-			if parts[1] == "--run" && len(parts) > 2 {
-				runID = parts[2]
-			} else {
-				configFile = getConfigFile(parts)
-			}
-		}
-		return m.runHistoryCmd(configFile, runID)
+		configFile, profileName, runID := parseHistoryArgs(parts)
+		return m.runHistoryCmd(configFile, profileName, runID)
+
+	case "/profile":
+		return m.handleProfileCommand(parts)
 
 	default:
 		return func() tea.Msg { return OutputMsg("Unknown command: " + cmd + "\n") }
@@ -676,18 +681,17 @@ Available Commands:
 
 // Wrappers for Orchestrator actions
 
-func (m Model) runMigrationCmd(configFile string) tea.Cmd {
+func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
 		// Output to the view
-		out := fmt.Sprintf("Running migration with config: %s\n", configFile)
-		
-		// Check file existence first for better error
-		if _, err := os.Stat(configFile); os.IsNotExist(err) {
-			return OutputMsg(out + "Config file not found. Run /wizard to create one.\n")
+		origin := "config: " + configFile
+		if profileName != "" {
+			origin = "profile: " + profileName
 		}
+		out := fmt.Sprintf("Running migration with %s\n", origin)
 
 		// Load config
-		cfg, err := config.Load(configFile)
+		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
 			return OutputMsg(out + fmt.Sprintf("Error loading config: %v\n", err))
 		}
@@ -698,23 +702,29 @@ func (m Model) runMigrationCmd(configFile string) tea.Cmd {
 			return OutputMsg(out + fmt.Sprintf("Error initializing orchestrator: %v\n", err))
 		}
 		defer orch.Close()
+		if profileName != "" {
+			orch.SetRunContext(profileName, "")
+		} else {
+			orch.SetRunContext("", configFile)
+		}
 
 		// Run
 		if err := orch.Run(context.Background()); err != nil {
 			return OutputMsg(out + fmt.Sprintf("Migration failed: %v\n", err))
 		}
-		
+
 		return OutputMsg(out + "Migration completed successfully!\n")
 	}
 }
 
-func (m Model) runValidateCmd(configFile string) tea.Cmd {
+func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
-		out := fmt.Sprintf("Validating with config: %s\n", configFile)
-		if _, err := os.Stat(configFile); os.IsNotExist(err) {
-			return OutputMsg(out + "Config file not found. Run /wizard to create one.\n")
+		origin := "config: " + configFile
+		if profileName != "" {
+			origin = "profile: " + profileName
 		}
-		cfg, err := config.Load(configFile)
+		out := fmt.Sprintf("Validating with %s\n", origin)
+		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
 			return OutputMsg(out + fmt.Sprintf("Error: %v\n", err))
 		}
@@ -731,12 +741,9 @@ func (m Model) runValidateCmd(configFile string) tea.Cmd {
 	}
 }
 
-func (m Model) runStatusCmd(configFile string) tea.Cmd {
+func (m Model) runStatusCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
-		if _, err := os.Stat(configFile); os.IsNotExist(err) {
-			return OutputMsg("Config file not found. Run /wizard to create one.\n")
-		}
-		cfg, err := config.Load(configFile)
+		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
 			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
 		}
@@ -754,12 +761,9 @@ func (m Model) runStatusCmd(configFile string) tea.Cmd {
 	}
 }
 
-func (m Model) runHistoryCmd(configFile, runID string) tea.Cmd {
+func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 	return func() tea.Msg {
-		if _, err := os.Stat(configFile); os.IsNotExist(err) {
-			return OutputMsg("Config file not found. Run /wizard to create one.\n")
-		}
-		cfg, err := config.Load(configFile)
+		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
 			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
 		}
@@ -782,27 +786,282 @@ func (m Model) runHistoryCmd(configFile, runID string) tea.Cmd {
 	}
 }
 
+func (m Model) handleProfileCommand(parts []string) tea.Cmd {
+	if len(parts) < 2 {
+		return func() tea.Msg { return OutputMsg("Usage: /profile save|list|delete|export\n") }
+	}
+
+	action := parts[1]
+	switch action {
+	case "list":
+		return m.profileListCmd()
+	case "save":
+		name, configFile := parseProfileSaveArgs(parts)
+		if name == "" {
+			return func() tea.Msg { return OutputMsg("Usage: /profile save NAME [config_file]\n") }
+		}
+		return m.profileSaveCmd(name, configFile)
+	case "delete":
+		if len(parts) < 3 {
+			return func() tea.Msg { return OutputMsg("Usage: /profile delete NAME\n") }
+		}
+		return m.profileDeleteCmd(parts[2])
+	case "export":
+		name, outFile := parseProfileExportArgs(parts)
+		if name == "" {
+			return func() tea.Msg { return OutputMsg("Usage: /profile export NAME [output_file]\n") }
+		}
+		return m.profileExportCmd(name, outFile)
+	default:
+		return func() tea.Msg { return OutputMsg("Unknown profile command: " + action + "\n") }
+	}
+}
+
+func parseConfigArgs(parts []string) (string, string) {
+	configFile := "config.yaml"
+	profileName := ""
+
+	for i := 1; i < len(parts); i++ {
+		arg := parts[i]
+		if arg == "--profile" && i+1 < len(parts) {
+			profileName = parts[i+1]
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "@") {
+			configFile = arg[1:]
+		} else {
+			configFile = arg
+		}
+	}
+
+	return configFile, profileName
+}
+
+func parseHistoryArgs(parts []string) (string, string, string) {
+	configFile := "config.yaml"
+	profileName := ""
+	runID := ""
+
+	for i := 1; i < len(parts); i++ {
+		arg := parts[i]
+		switch arg {
+		case "--run":
+			if i+1 < len(parts) {
+				runID = parts[i+1]
+				i++
+			}
+		case "--profile":
+			if i+1 < len(parts) {
+				profileName = parts[i+1]
+				i++
+			}
+		default:
+			if strings.HasPrefix(arg, "@") {
+				configFile = arg[1:]
+			} else {
+				configFile = arg
+			}
+		}
+	}
+
+	return configFile, profileName, runID
+}
+
+func parseProfileSaveArgs(parts []string) (string, string) {
+	if len(parts) < 3 {
+		return "", "config.yaml"
+	}
+	name := parts[2]
+	configFile := "config.yaml"
+	if len(parts) > 3 {
+		if strings.HasPrefix(parts[3], "@") {
+			configFile = parts[3][1:]
+		} else {
+			configFile = parts[3]
+		}
+	}
+	return name, configFile
+}
+
+func parseProfileExportArgs(parts []string) (string, string) {
+	if len(parts) < 3 {
+		return "", "config.yaml"
+	}
+	name := parts[2]
+	outFile := "config.yaml"
+	if len(parts) > 3 {
+		if strings.HasPrefix(parts[3], "@") {
+			outFile = parts[3][1:]
+		} else {
+			outFile = parts[3]
+		}
+	}
+	return name, outFile
+}
+
+func loadConfigFromOrigin(configFile, profileName string) (*config.Config, error) {
+	if profileName != "" {
+		return loadProfileConfig(profileName)
+	}
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		return nil, fmt.Errorf("config file not found: %s", configFile)
+	}
+	return config.Load(configFile)
+}
+
+func loadProfileConfig(name string) (*config.Config, error) {
+	dataDir, err := config.DefaultDataDir()
+	if err != nil {
+		return nil, err
+	}
+	state, err := checkpoint.New(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	defer state.Close()
+
+	blob, err := state.GetProfile(name)
+	if err != nil {
+		return nil, err
+	}
+	return config.LoadBytes(blob)
+}
+
+func (m Model) profileSaveCmd(name, configFile string) tea.Cmd {
+	return func() tea.Msg {
+		cfg, err := config.Load(configFile)
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error loading config: %v\n", err))
+		}
+		payload, err := yaml.Marshal(cfg)
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error encoding config: %v\n", err))
+		}
+
+		dataDir, err := config.DefaultDataDir()
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
+		}
+		state, err := checkpoint.New(dataDir)
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
+		}
+		defer state.Close()
+
+		if err := state.SaveProfile(name, payload); err != nil {
+			return OutputMsg(fmt.Sprintf("Error saving profile: %v\n", err))
+		}
+		return OutputMsg(fmt.Sprintf("Saved profile %q\n", name))
+	}
+}
+
+func (m Model) profileListCmd() tea.Cmd {
+	return func() tea.Msg {
+		dataDir, err := config.DefaultDataDir()
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
+		}
+		state, err := checkpoint.New(dataDir)
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
+		}
+		defer state.Close()
+
+		profiles, err := state.ListProfiles()
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error listing profiles: %v\n", err))
+		}
+		if len(profiles) == 0 {
+			return OutputMsg("No profiles found\n")
+		}
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "%-20s %-20s %-20s\n", "Name", "Created", "Updated")
+		for _, p := range profiles {
+			fmt.Fprintf(&b, "%-20s %-20s %-20s\n",
+				p.Name,
+				p.CreatedAt.Format("2006-01-02 15:04:05"),
+				p.UpdatedAt.Format("2006-01-02 15:04:05"))
+		}
+		return OutputMsg(b.String())
+	}
+}
+
+func (m Model) profileDeleteCmd(name string) tea.Cmd {
+	return func() tea.Msg {
+		dataDir, err := config.DefaultDataDir()
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
+		}
+		state, err := checkpoint.New(dataDir)
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
+		}
+		defer state.Close()
+
+		if err := state.DeleteProfile(name); err != nil {
+			return OutputMsg(fmt.Sprintf("Error deleting profile: %v\n", err))
+		}
+		return OutputMsg(fmt.Sprintf("Deleted profile %q\n", name))
+	}
+}
+
+func (m Model) profileExportCmd(name, outFile string) tea.Cmd {
+	return func() tea.Msg {
+		dataDir, err := config.DefaultDataDir()
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
+		}
+		state, err := checkpoint.New(dataDir)
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
+		}
+		defer state.Close()
+
+		blob, err := state.GetProfile(name)
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error loading profile: %v\n", err))
+		}
+		if err := os.WriteFile(outFile, blob, 0600); err != nil {
+			return OutputMsg(fmt.Sprintf("Error exporting profile: %v\n", err))
+		}
+		return OutputMsg(fmt.Sprintf("Exported profile %q to %s\n", name, outFile))
+	}
+}
 
 func (m *Model) processWizardInput(input string) tea.Cmd {
 	// Capture input for current step before moving to next
 	switch m.step {
 	case stepSourceType:
-		if input != "" { m.wizardData.Source.Type = input }
+		if input != "" {
+			m.wizardData.Source.Type = input
+		}
 		m.step = stepSourceHost
 	case stepSourceHost:
-		if input != "" { m.wizardData.Source.Host = input }
+		if input != "" {
+			m.wizardData.Source.Host = input
+		}
 		m.step = stepSourcePort
 	case stepSourcePort:
-		if input != "" { fmt.Sscanf(input, "%d", &m.wizardData.Source.Port) }
+		if input != "" {
+			fmt.Sscanf(input, "%d", &m.wizardData.Source.Port)
+		}
 		m.step = stepSourceDB
 	case stepSourceDB:
-		if input != "" { m.wizardData.Source.Database = input }
+		if input != "" {
+			m.wizardData.Source.Database = input
+		}
 		m.step = stepSourceUser
 	case stepSourceUser:
-		if input != "" { m.wizardData.Source.User = input }
+		if input != "" {
+			m.wizardData.Source.User = input
+		}
 		m.step = stepSourcePass
 	case stepSourcePass:
-		if input != "" { m.wizardData.Source.Password = input }
+		if input != "" {
+			m.wizardData.Source.Password = input
+		}
 		m.step = stepSourceSSL
 		m.textInput.EchoMode = textinput.EchoNormal
 	case stepSourceSSL:
@@ -819,22 +1078,34 @@ func (m *Model) processWizardInput(input string) tea.Cmd {
 		}
 		m.step = stepTargetType
 	case stepTargetType:
-		if input != "" { m.wizardData.Target.Type = input }
+		if input != "" {
+			m.wizardData.Target.Type = input
+		}
 		m.step = stepTargetHost
 	case stepTargetHost:
-		if input != "" { m.wizardData.Target.Host = input }
+		if input != "" {
+			m.wizardData.Target.Host = input
+		}
 		m.step = stepTargetPort
 	case stepTargetPort:
-		if input != "" { fmt.Sscanf(input, "%d", &m.wizardData.Target.Port) }
+		if input != "" {
+			fmt.Sscanf(input, "%d", &m.wizardData.Target.Port)
+		}
 		m.step = stepTargetDB
 	case stepTargetDB:
-		if input != "" { m.wizardData.Target.Database = input }
+		if input != "" {
+			m.wizardData.Target.Database = input
+		}
 		m.step = stepTargetUser
 	case stepTargetUser:
-		if input != "" { m.wizardData.Target.User = input }
+		if input != "" {
+			m.wizardData.Target.User = input
+		}
 		m.step = stepTargetPass
 	case stepTargetPass:
-		if input != "" { m.wizardData.Target.Password = input }
+		if input != "" {
+			m.wizardData.Target.Password = input
+		}
 		m.step = stepTargetSSL
 		m.textInput.EchoMode = textinput.EchoNormal
 	case stepTargetSSL:
@@ -851,7 +1122,9 @@ func (m *Model) processWizardInput(input string) tea.Cmd {
 		}
 		m.step = stepWorkers
 	case stepWorkers:
-		if input != "" { fmt.Sscanf(input, "%d", &m.wizardData.Migration.Workers) }
+		if input != "" {
+			fmt.Sscanf(input, "%d", &m.wizardData.Migration.Workers)
+		}
 		return m.finishWizard()
 	}
 	return nil
@@ -862,13 +1135,17 @@ func (m *Model) renderWizardPrompt() string {
 	switch m.step {
 	case stepSourceType:
 		def := "mssql"
-		if m.wizardData.Source.Type != "" { def = m.wizardData.Source.Type }
+		if m.wizardData.Source.Type != "" {
+			def = m.wizardData.Source.Type
+		}
 		prompt = fmt.Sprintf("Source Type (mssql/postgres) [%s]: ", def)
 	case stepSourceHost:
 		prompt = fmt.Sprintf("Source Host [%s]: ", m.wizardData.Source.Host)
 	case stepSourcePort:
 		def := 1433
-		if m.wizardData.Source.Port != 0 { def = m.wizardData.Source.Port }
+		if m.wizardData.Source.Port != 0 {
+			def = m.wizardData.Source.Port
+		}
 		prompt = fmt.Sprintf("Source Port [%d]: ", def)
 	case stepSourceDB:
 		prompt = fmt.Sprintf("Source Database [%s]: ", m.wizardData.Source.Database)
@@ -880,22 +1157,30 @@ func (m *Model) renderWizardPrompt() string {
 	case stepSourceSSL:
 		if m.wizardData.Source.Type == "postgres" {
 			def := "require"
-			if m.wizardData.Source.SSLMode != "" { def = m.wizardData.Source.SSLMode }
+			if m.wizardData.Source.SSLMode != "" {
+				def = m.wizardData.Source.SSLMode
+			}
 			prompt = fmt.Sprintf("Source SSL Mode [%s]: ", def)
 		} else {
 			def := "n"
-			if m.wizardData.Source.TrustServerCert { def = "y" }
+			if m.wizardData.Source.TrustServerCert {
+				def = "y"
+			}
 			prompt = fmt.Sprintf("Trust Source Server Certificate? (y/n) [%s]: ", def)
 		}
 	case stepTargetType:
 		def := "postgres"
-		if m.wizardData.Target.Type != "" { def = m.wizardData.Target.Type }
+		if m.wizardData.Target.Type != "" {
+			def = m.wizardData.Target.Type
+		}
 		prompt = fmt.Sprintf("Target Type (postgres/mssql) [%s]: ", def)
 	case stepTargetHost:
 		prompt = fmt.Sprintf("Target Host [%s]: ", m.wizardData.Target.Host)
 	case stepTargetPort:
 		def := 5432
-		if m.wizardData.Target.Port != 0 { def = m.wizardData.Target.Port }
+		if m.wizardData.Target.Port != 0 {
+			def = m.wizardData.Target.Port
+		}
 		prompt = fmt.Sprintf("Target Port [%d]: ", def)
 	case stepTargetDB:
 		prompt = fmt.Sprintf("Target Database [%s]: ", m.wizardData.Target.Database)
@@ -907,16 +1192,22 @@ func (m *Model) renderWizardPrompt() string {
 	case stepTargetSSL:
 		if m.wizardData.Target.Type == "postgres" {
 			def := "require"
-			if m.wizardData.Target.SSLMode != "" { def = m.wizardData.Target.SSLMode }
+			if m.wizardData.Target.SSLMode != "" {
+				def = m.wizardData.Target.SSLMode
+			}
 			prompt = fmt.Sprintf("Target SSL Mode [%s]: ", def)
 		} else {
 			def := "n"
-			if m.wizardData.Target.TrustServerCert { def = "y" }
+			if m.wizardData.Target.TrustServerCert {
+				def = "y"
+			}
 			prompt = fmt.Sprintf("Trust Target Server Certificate? (y/n) [%s]: ", def)
 		}
 	case stepWorkers:
 		def := 8
-		if m.wizardData.Migration.Workers != 0 { def = m.wizardData.Migration.Workers }
+		if m.wizardData.Migration.Workers != 0 {
+			def = m.wizardData.Migration.Workers
+		}
 		prompt = fmt.Sprintf("Parallel Workers [%d]: ", def)
 	}
 	return prompt
@@ -924,7 +1215,7 @@ func (m *Model) renderWizardPrompt() string {
 
 func (m *Model) handleWizardStep(input string) tea.Cmd {
 	if input != "" {
-		m.logBuffer += styleUserInput.Render("> " + input) + "\n"
+		m.logBuffer += styleUserInput.Render("> "+input) + "\n"
 		m.viewport.SetContent(m.logBuffer)
 		m.textInput.Reset()
 	} else {

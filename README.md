@@ -35,6 +35,47 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 
 Starting with v1.10.0, credentials are always redacted before being stored.
 
+## Encrypted Profiles (SQLite)
+
+You can store full configuration profiles (including secrets) encrypted at rest inside the same SQLite database used for run history.
+
+**Master key**
+- Set `MSSQL_PG_MIGRATE_MASTER_KEY` to a **base64-encoded 32-byte key**.
+- Example key generation (POSIX):
+  ```bash
+  openssl rand -base64 32
+  ```
+- Without this key, profile operations will fail, but YAML-based workflows continue to work.
+
+**CLI workflow**
+```bash
+# Save a profile from YAML (encrypts and stores in SQLite)
+MSSQL_PG_MIGRATE_MASTER_KEY=... ./mssql-pg-migrate profile save --name prod --config config.yaml
+
+# List profiles
+MSSQL_PG_MIGRATE_MASTER_KEY=... ./mssql-pg-migrate profile list
+
+# Run using a profile
+MSSQL_PG_MIGRATE_MASTER_KEY=... ./mssql-pg-migrate run --profile prod
+
+# Export a profile back to YAML
+MSSQL_PG_MIGRATE_MASTER_KEY=... ./mssql-pg-migrate profile export --name prod --out config.yaml
+```
+
+**TUI workflow**
+```
+/profile save prod @config.yaml
+/profile list
+/run --profile prod
+/profile export prod @config.yaml
+```
+
+**Airflow note**
+- Profiles are stored as encrypted blobs in the same SQLite DB (`~/.mssql-pg-migrate/migrate.db` by default).
+- In Airflow, you can set `MSSQL_PG_MIGRATE_MASTER_KEY` via your secrets backend and run `profile save` at deploy time, or stick with YAML + env vars for CI/CD.
+- You can relocate the SQLite DB by setting `migration.data_dir` in your config (e.g., to a shared volume).
+- On first run, the default data directory (`~/.mssql-pg-migrate`) is created automatically if it does not exist.
+
 ## Performance
 
 - **575,000 rows/sec** MSSQL → PostgreSQL (auto-tuned, 19M rows in 34s)

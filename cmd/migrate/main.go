@@ -7,10 +7,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
 	"github.com/johndauphine/mssql-pg-migrate/internal/tui"
 	"github.com/urfave/cli/v2"
+	"gopkg.in/yaml.v3"
 )
 
 var version = "dev"
@@ -42,6 +44,10 @@ func main() {
 				Action: runMigration,
 				Flags: []cli.Flag{
 					&cli.StringFlag{
+						Name:  "profile",
+						Usage: "Profile name stored in SQLite",
+					},
+					&cli.StringFlag{
 						Name:  "source-schema",
 						Value: "dbo",
 						Usage: "Source schema name",
@@ -62,27 +68,111 @@ func main() {
 				Name:   "resume",
 				Usage:  "Resume an interrupted migration",
 				Action: resumeMigration,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "profile",
+						Usage: "Profile name stored in SQLite",
+					},
+				},
 			},
 			{
 				Name:   "status",
 				Usage:  "Show status of current/last run",
 				Action: showStatus,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "profile",
+						Usage: "Profile name stored in SQLite",
+					},
+				},
 			},
 			{
 				Name:   "validate",
 				Usage:  "Validate row counts between source and target",
 				Action: validateMigration,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "profile",
+						Usage: "Profile name stored in SQLite",
+					},
+				},
 			},
 			{
 				Name:  "history",
 				Usage: "List all migration runs, or view details of a specific run",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
+						Name:  "profile",
+						Usage: "Profile name stored in SQLite",
+					},
+					&cli.StringFlag{
 						Name:  "run",
 						Usage: "Show details for a specific run ID",
 					},
 				},
 				Action: showHistory,
+			},
+			{
+				Name:  "profile",
+				Usage: "Manage encrypted profiles stored in SQLite",
+				Subcommands: []*cli.Command{
+					{
+						Name:   "save",
+						Usage:  "Save a profile from a config file",
+						Action: saveProfile,
+						Flags: []cli.Flag{
+							&cli.StringFlag{
+								Name:     "name",
+								Aliases:  []string{"n"},
+								Required: true,
+								Usage:    "Profile name",
+							},
+							&cli.StringFlag{
+								Name:    "config",
+								Aliases: []string{"c"},
+								Value:   "config.yaml",
+								Usage:   "Path to configuration file",
+							},
+						},
+					},
+					{
+						Name:   "list",
+						Usage:  "List saved profiles",
+						Action: listProfiles,
+					},
+					{
+						Name:   "delete",
+						Usage:  "Delete a saved profile",
+						Action: deleteProfile,
+						Flags: []cli.Flag{
+							&cli.StringFlag{
+								Name:     "name",
+								Aliases:  []string{"n"},
+								Required: true,
+								Usage:    "Profile name",
+							},
+						},
+					},
+					{
+						Name:   "export",
+						Usage:  "Export a profile to a config file",
+						Action: exportProfile,
+						Flags: []cli.Flag{
+							&cli.StringFlag{
+								Name:     "name",
+								Aliases:  []string{"n"},
+								Required: true,
+								Usage:    "Profile name",
+							},
+							&cli.StringFlag{
+								Name:    "out",
+								Aliases: []string{"o"},
+								Value:   "config.yaml",
+								Usage:   "Output path for exported config",
+							},
+						},
+					},
+				},
 			},
 		},
 	}
@@ -98,12 +188,7 @@ func startTUI(c *cli.Context) error {
 }
 
 func runMigration(c *cli.Context) error {
-	configPath := c.String("config")
-	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
-		return fmt.Errorf("configuration file not found: %s\nPlease provide a config file with -c or create a config.yaml in the current directory.\n\nUsage: mssql-pg-migrate run [options]", configPath)
-	}
-
-	cfg, err := config.Load(configPath)
+	cfg, profileName, configPath, err := loadConfigWithOrigin(c)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -125,6 +210,7 @@ func runMigration(c *cli.Context) error {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
 	defer orch.Close()
+	orch.SetRunContext(profileName, configPath)
 
 	// Handle graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -144,12 +230,7 @@ func runMigration(c *cli.Context) error {
 }
 
 func resumeMigration(c *cli.Context) error {
-	configPath := c.String("config")
-	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
-		return fmt.Errorf("configuration file not found: %s\nPlease provide a config file with -c or create a config.yaml in the current directory.", configPath)
-	}
-
-	cfg, err := config.Load(configPath)
+	cfg, _, _, err := loadConfigWithOrigin(c)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -176,12 +257,7 @@ func resumeMigration(c *cli.Context) error {
 }
 
 func showStatus(c *cli.Context) error {
-	configPath := c.String("config")
-	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
-		return fmt.Errorf("configuration file not found: %s", configPath)
-	}
-
-	cfg, err := config.Load(configPath)
+	cfg, _, _, err := loadConfigWithOrigin(c)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -196,12 +272,7 @@ func showStatus(c *cli.Context) error {
 }
 
 func validateMigration(c *cli.Context) error {
-	configPath := c.String("config")
-	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
-		return fmt.Errorf("configuration file not found: %s", configPath)
-	}
-
-	cfg, err := config.Load(configPath)
+	cfg, _, _, err := loadConfigWithOrigin(c)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -216,12 +287,7 @@ func validateMigration(c *cli.Context) error {
 }
 
 func showHistory(c *cli.Context) error {
-	configPath := c.String("config")
-	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
-		return fmt.Errorf("configuration file not found: %s", configPath)
-	}
-
-	cfg, err := config.Load(configPath)
+	cfg, _, _, err := loadConfigWithOrigin(c)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -240,3 +306,137 @@ func showHistory(c *cli.Context) error {
 	return orch.ShowHistory()
 }
 
+func loadConfigWithOrigin(c *cli.Context) (*config.Config, string, string, error) {
+	profileName := c.String("profile")
+	if profileName != "" {
+		cfg, err := loadProfileConfig(profileName)
+		return cfg, profileName, "", err
+	}
+
+	configPath := c.String("config")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
+		return nil, "", "", fmt.Errorf("configuration file not found: %s", configPath)
+	}
+	cfg, err := config.Load(configPath)
+	return cfg, "", configPath, err
+}
+
+func loadProfileConfig(name string) (*config.Config, error) {
+	dataDir, err := config.DefaultDataDir()
+	if err != nil {
+		return nil, err
+	}
+	state, err := checkpoint.New(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	defer state.Close()
+
+	blob, err := state.GetProfile(name)
+	if err != nil {
+		return nil, err
+	}
+	return config.LoadBytes(blob)
+}
+
+func saveProfile(c *cli.Context) error {
+	name := c.String("name")
+	configPath := c.String("config")
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	payload, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+
+	dataDir, err := config.DefaultDataDir()
+	if err != nil {
+		return err
+	}
+	state, err := checkpoint.New(dataDir)
+	if err != nil {
+		return err
+	}
+	defer state.Close()
+
+	if err := state.SaveProfile(name, payload); err != nil {
+		return err
+	}
+	fmt.Printf("Saved profile %q\n", name)
+	return nil
+}
+
+func listProfiles(c *cli.Context) error {
+	dataDir, err := config.DefaultDataDir()
+	if err != nil {
+		return err
+	}
+	state, err := checkpoint.New(dataDir)
+	if err != nil {
+		return err
+	}
+	defer state.Close()
+
+	profiles, err := state.ListProfiles()
+	if err != nil {
+		return err
+	}
+	if len(profiles) == 0 {
+		fmt.Println("No profiles found")
+		return nil
+	}
+	fmt.Printf("%-20s %-20s %-20s\n", "Name", "Created", "Updated")
+	for _, p := range profiles {
+		fmt.Printf("%-20s %-20s %-20s\n",
+			p.Name,
+			p.CreatedAt.Format("2006-01-02 15:04:05"),
+			p.UpdatedAt.Format("2006-01-02 15:04:05"))
+	}
+	return nil
+}
+
+func deleteProfile(c *cli.Context) error {
+	name := c.String("name")
+	dataDir, err := config.DefaultDataDir()
+	if err != nil {
+		return err
+	}
+	state, err := checkpoint.New(dataDir)
+	if err != nil {
+		return err
+	}
+	defer state.Close()
+
+	if err := state.DeleteProfile(name); err != nil {
+		return err
+	}
+	fmt.Printf("Deleted profile %q\n", name)
+	return nil
+}
+
+func exportProfile(c *cli.Context) error {
+	name := c.String("name")
+	outPath := c.String("out")
+
+	dataDir, err := config.DefaultDataDir()
+	if err != nil {
+		return err
+	}
+	state, err := checkpoint.New(dataDir)
+	if err != nil {
+		return err
+	}
+	defer state.Close()
+
+	blob, err := state.GetProfile(name)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(outPath, blob, 0600); err != nil {
+		return err
+	}
+	fmt.Printf("Exported profile %q to %s\n", name, outPath)
+	return nil
+}
