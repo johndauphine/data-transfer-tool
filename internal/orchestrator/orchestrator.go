@@ -1082,6 +1082,16 @@ func (o *Orchestrator) ShowStatus() error {
 		return nil
 	}
 
+	// Check if a successful run supersedes this incomplete run
+	superseded, err := o.state.HasSuccessfulRunAfter(run)
+	if err != nil {
+		return err
+	}
+	if superseded {
+		fmt.Println("No active migration")
+		return nil
+	}
+
 	total, pending, running, success, failed, err := o.state.GetRunStats(run.ID)
 	if err != nil {
 		return err
