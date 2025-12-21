@@ -4,7 +4,8 @@ mssql-pg-migrate-*
 *.exe
 
 # Config with secrets
-config.yaml
+*.yaml
+*.yml
 
 # State database
 *.db
