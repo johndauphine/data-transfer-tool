@@ -289,8 +289,9 @@ func Execute(
 	job Job,
 	prog *progress.Tracker,
 ) (*TransferStats, error) {
-	// Update progress bar with current table name
-	prog.SetTable(job.Table.Name)
+	// Track table start/end for accurate progress display
+	prog.StartTable(job.Table.Name)
+	defer prog.EndTable(job.Table.Name)
 
 	// Check for saved progress (chunk-level resume)
 	var resumeLastPK any

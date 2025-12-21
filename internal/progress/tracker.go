@@ -2,6 +2,7 @@ package progress
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,12 +15,17 @@ type Tracker struct {
 	total     int64
 	current   atomic.Int64
 	startTime time.Time
+
+	// Track active tables for accurate display
+	mu           sync.Mutex
+	activeTables map[string]int // table name -> active job count
 }
 
 // New creates a new progress tracker
 func New() *Tracker {
 	return &Tracker{
-		startTime: time.Now(),
+		startTime:    time.Now(),
+		activeTables: make(map[string]int),
 	}
 }
 
@@ -49,13 +55,52 @@ func (t *Tracker) Add(n int64) {
 	}
 }
 
-// SetTable updates the progress bar description with the current table name
-func (t *Tracker) SetTable(tableName string) {
+// StartTable marks a table as actively transferring
+func (t *Tracker) StartTable(tableName string) {
+	t.mu.Lock()
+	t.activeTables[tableName]++
+	tableCount := len(t.activeTables)
+	t.mu.Unlock()
+
 	if t.bar != nil {
-		t.bar.Describe(fmt.Sprintf("Transferring %s", tableName))
-		// Force immediate render by calling RenderBlank
+		if tableCount == 1 {
+			t.bar.Describe(fmt.Sprintf("Transferring %s", tableName))
+		} else {
+			t.bar.Describe(fmt.Sprintf("Transferring (%d tables)", tableCount))
+		}
 		t.bar.RenderBlank()
 	}
+}
+
+// EndTable marks a table job as done transferring
+func (t *Tracker) EndTable(tableName string) {
+	t.mu.Lock()
+	t.activeTables[tableName]--
+	if t.activeTables[tableName] <= 0 {
+		delete(t.activeTables, tableName)
+	}
+	tableCount := len(t.activeTables)
+	// Get remaining table name if only one left
+	var remaining string
+	for name := range t.activeTables {
+		remaining = name
+		break
+	}
+	t.mu.Unlock()
+
+	if t.bar != nil && tableCount > 0 {
+		if tableCount == 1 {
+			t.bar.Describe(fmt.Sprintf("Transferring %s", remaining))
+		} else {
+			t.bar.Describe(fmt.Sprintf("Transferring (%d tables)", tableCount))
+		}
+	}
+}
+
+// SetTable updates the progress bar description with the current table name
+// Deprecated: Use StartTable/EndTable for accurate multi-table tracking
+func (t *Tracker) SetTable(tableName string) {
+	t.StartTable(tableName)
 }
 
 // Current returns the current count
