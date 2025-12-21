@@ -53,6 +53,8 @@ func (t *Tracker) Add(n int64) {
 func (t *Tracker) SetTable(tableName string) {
 	if t.bar != nil {
 		t.bar.Describe(fmt.Sprintf("Transferring %s", tableName))
+		// Force immediate render by calling RenderBlank
+		t.bar.RenderBlank()
 	}
 }
 
