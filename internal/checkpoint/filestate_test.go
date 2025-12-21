@@ -90,7 +90,7 @@ func TestFileState_CreateAndResumeRun(t *testing.T) {
 	}
 
 	// Complete the run
-	err = fs.CompleteRun("test123", "success")
+	err = fs.CompleteRun("test123", "success", "")
 	if err != nil {
 		t.Fatalf("CompleteRun: %v", err)
 	}

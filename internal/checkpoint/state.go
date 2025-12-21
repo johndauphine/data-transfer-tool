@@ -44,6 +44,7 @@ type Run struct {
 	Config       string
 	ProfileName  string
 	ConfigPath   string
+	Error        string // Error message if status is "failed"
 }
 
 // TransferProgress tracks chunk-level progress
@@ -171,12 +172,15 @@ func (s *State) ensureRunColumns() error {
 
 	needsProfile := true
 	needsConfigPath := true
+	needsError := true
 	for _, col := range columns {
 		switch col {
 		case "profile_name":
 			needsProfile = false
 		case "config_path":
 			needsConfigPath = false
+		case "error":
+			needsError = false
 		}
 	}
 
@@ -187,6 +191,11 @@ func (s *State) ensureRunColumns() error {
 	}
 	if needsConfigPath {
 		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN config_path TEXT`); err != nil {
+			return err
+		}
+	}
+	if needsError {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN error TEXT`); err != nil {
 			return err
 		}
 	}
@@ -318,11 +327,11 @@ func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any, pro
 }
 
 // CompleteRun marks a run as complete
-func (s *State) CompleteRun(id string, status string) error {
+func (s *State) CompleteRun(id string, status string, errorMsg string) error {
 	_, err := s.db.Exec(`
-		UPDATE runs SET status = ?, completed_at = datetime('now')
+		UPDATE runs SET status = ?, completed_at = datetime('now'), error = ?
 		WHERE id = ?
-	`, status, id)
+	`, status, errorMsg, id)
 	return err
 }
 
@@ -563,7 +572,7 @@ func (p *ProgressSaver) GetProgress(taskID int64) (lastPK any, rowsDone int64, e
 // GetAllRuns returns all runs for history
 func (s *State) GetAllRuns() ([]Run, error) {
 	rows, err := s.db.Query(`
-		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path
+		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
 		FROM runs ORDER BY started_at DESC LIMIT 20
 	`)
 	if err != nil {
@@ -577,8 +586,8 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		var startedAtStr string
 		var completedAtStr sql.NullString
 		var configStr sql.NullString
-		var profileName, configPath sql.NullString
-		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath); err != nil {
+		var profileName, configPath, errorMsg sql.NullString
+		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
 			return nil, err
 		}
 		r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
@@ -595,6 +604,9 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		if configPath.Valid {
 			r.ConfigPath = configPath.String
 		}
+		if errorMsg.Valid {
+			r.Error = errorMsg.String
+		}
 		runs = append(runs, r)
 	}
 	return runs, nil
@@ -607,11 +619,11 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 	var completedAtStr sql.NullString
 	var configStr sql.NullString
 
-	var profileName, configPath sql.NullString
+	var profileName, configPath, errorMsg sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path
+		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
 		FROM runs WHERE id = ?
-	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath)
+	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -633,6 +645,9 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 	}
 	if configPath.Valid {
 		r.ConfigPath = configPath.String
+	}
+	if errorMsg.Valid {
+		r.Error = errorMsg.String
 	}
 	return &r, nil
 }

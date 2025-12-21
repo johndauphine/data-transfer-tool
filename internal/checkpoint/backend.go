@@ -5,7 +5,7 @@ package checkpoint
 type StateBackend interface {
 	// Run management
 	CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error
-	CompleteRun(id string, status string) error
+	CompleteRun(id string, status string, errorMsg string) error
 	GetLastIncompleteRun() (*Run, error)
 	MarkRunAsResumed(runID string) error
 

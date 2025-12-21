@@ -150,7 +150,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	fmt.Println("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
-		o.state.CompleteRun(runID, "failed")
+		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("extracting schema: %w", err)
 	}
@@ -181,7 +181,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Apply table filters
 	tables = o.filterTables(tables)
 	if len(tables) == 0 {
-		o.state.CompleteRun(runID, "failed")
+		o.state.CompleteRun(runID, "failed", "no tables to migrate after applying filters")
 		return fmt.Errorf("no tables to migrate after applying filters")
 	}
 
@@ -206,7 +206,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Create target schema and tables
 	if err := o.targetPool.CreateSchema(ctx, o.config.Target.Schema); err != nil {
-		o.state.CompleteRun(runID, "failed")
+		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("creating schema: %w", err)
 	}
@@ -216,19 +216,19 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		for _, t := range tables {
 			exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
 			if err != nil {
-				o.state.CompleteRun(runID, "failed")
+				o.state.CompleteRun(runID, "failed", err.Error())
 				o.notifyFailure(runID, err, time.Since(startTime))
 				return fmt.Errorf("checking if table %s exists: %w", t.Name, err)
 			}
 			if exists {
 				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
-					o.state.CompleteRun(runID, "failed")
+					o.state.CompleteRun(runID, "failed", err.Error())
 					o.notifyFailure(runID, err, time.Since(startTime))
 					return fmt.Errorf("truncating table %s: %w", t.Name, err)
 				}
 			} else {
 				if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
-					o.state.CompleteRun(runID, "failed")
+					o.state.CompleteRun(runID, "failed", err.Error())
 					o.notifyFailure(runID, err, time.Since(startTime))
 					return fmt.Errorf("creating table %s: %w", t.FullName(), err)
 				}
@@ -239,12 +239,12 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		fmt.Println("Creating target tables (drop and recreate)...")
 		for _, t := range tables {
 			if err := o.targetPool.DropTable(ctx, o.config.Target.Schema, t.Name); err != nil {
-				o.state.CompleteRun(runID, "failed")
+				o.state.CompleteRun(runID, "failed", err.Error())
 				o.notifyFailure(runID, err, time.Since(startTime))
 				return fmt.Errorf("dropping table %s: %w", t.Name, err)
 			}
 			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
-				o.state.CompleteRun(runID, "failed")
+				o.state.CompleteRun(runID, "failed", err.Error())
 				o.notifyFailure(runID, err, time.Since(startTime))
 				return fmt.Errorf("creating table %s: %w", t.FullName(), err)
 			}
@@ -259,7 +259,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			fmt.Println("Migration interrupted - run 'resume' to continue")
 			return fmt.Errorf("transferring data: %w", err)
 		}
-		o.state.CompleteRun(runID, "failed")
+		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("transferring data: %w", err)
 	}
@@ -267,7 +267,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Finalize
 	fmt.Println("Finalizing...")
 	if err := o.finalize(ctx, tables); err != nil {
-		o.state.CompleteRun(runID, "failed")
+		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
 	}
@@ -275,7 +275,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Validate
 	fmt.Println("Validating...")
 	if err := o.Validate(ctx); err != nil {
-		o.state.CompleteRun(runID, "failed")
+		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return err
 	}
@@ -296,7 +296,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 	throughput := float64(totalRows) / duration.Seconds()
 
-	o.state.CompleteRun(runID, "success")
+	o.state.CompleteRun(runID, "success", "")
 	o.notifier.MigrationCompleted(runID, startTime, duration, len(tables), totalRows, throughput)
 	fmt.Println("Migration complete!")
 
@@ -877,7 +877,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	fmt.Println("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
-		o.state.CompleteRun(run.ID, "failed")
+		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return fmt.Errorf("extracting schema: %w", err)
 	}
@@ -885,7 +885,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	// Apply table filters
 	tables = o.filterTables(tables)
 	if len(tables) == 0 {
-		o.state.CompleteRun(run.ID, "failed")
+		o.state.CompleteRun(run.ID, "failed", "no tables to migrate after applying filters")
 		return fmt.Errorf("no tables to migrate after applying filters")
 	}
 
@@ -927,7 +927,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		// Finalize
 		fmt.Println("Finalizing...")
 		if err := o.finalize(ctx, tables); err != nil {
-			o.state.CompleteRun(run.ID, "failed")
+			o.state.CompleteRun(run.ID, "failed", err.Error())
 			o.notifyFailure(run.ID, err, time.Since(startTime))
 			return fmt.Errorf("finalizing: %w", err)
 		}
@@ -935,12 +935,12 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		// Validate
 		fmt.Println("Validating...")
 		if err := o.Validate(ctx); err != nil {
-			o.state.CompleteRun(run.ID, "failed")
+			o.state.CompleteRun(run.ID, "failed", err.Error())
 			o.notifyFailure(run.ID, err, time.Since(startTime))
 			return err
 		}
 
-		o.state.CompleteRun(run.ID, "success")
+		o.state.CompleteRun(run.ID, "success", "")
 		fmt.Println("Resume complete!")
 		return nil
 	}
@@ -956,13 +956,13 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
 		if err != nil {
-			o.state.CompleteRun(run.ID, "failed")
+			o.state.CompleteRun(run.ID, "failed", err.Error())
 			return fmt.Errorf("checking table %s: %w", t.Name, err)
 		}
 		if !exists {
 			// Table doesn't exist - create it and clear any stale progress
 			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
-				o.state.CompleteRun(run.ID, "failed")
+				o.state.CompleteRun(run.ID, "failed", err.Error())
 				return fmt.Errorf("creating table %s: %w", t.Name, err)
 			}
 			// Clear any saved progress since we're starting fresh
@@ -974,7 +974,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 			if lastPK == nil {
 				// No chunk progress - truncate to ensure clean re-transfer
 				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
-					o.state.CompleteRun(run.ID, "failed")
+					o.state.CompleteRun(run.ID, "failed", err.Error())
 					return fmt.Errorf("truncating table %s: %w", t.Name, err)
 				}
 			} else {
@@ -982,7 +982,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 				// If target has fewer rows than saved progress, data was lost; start fresh
 				targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
 				if err != nil {
-					o.state.CompleteRun(run.ID, "failed")
+					o.state.CompleteRun(run.ID, "failed", err.Error())
 					return fmt.Errorf("getting row count for %s: %w", t.Name, err)
 				}
 				if targetCount < rowsDone {
@@ -991,7 +991,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 						t.Name, targetCount, rowsDone)
 					o.state.ClearTransferProgress(taskID)
 					if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
-						o.state.CompleteRun(run.ID, "failed")
+						o.state.CompleteRun(run.ID, "failed", err.Error())
 						return fmt.Errorf("truncating table %s: %w", t.Name, err)
 					}
 				}
@@ -1003,7 +1003,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	// Transfer only the incomplete tables
 	fmt.Println("Transferring data...")
 	if err := o.transferAll(ctx, run.ID, tablesToTransfer); err != nil {
-		o.state.CompleteRun(run.ID, "failed")
+		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return fmt.Errorf("transferring data: %w", err)
 	}
@@ -1012,7 +1012,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	o.tables = tables
 	fmt.Println("Finalizing...")
 	if err := o.finalize(ctx, tables); err != nil {
-		o.state.CompleteRun(run.ID, "failed")
+		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
 	}
@@ -1020,7 +1020,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	// Validate all tables
 	fmt.Println("Validating...")
 	if err := o.Validate(ctx); err != nil {
-		o.state.CompleteRun(run.ID, "failed")
+		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return err
 	}
@@ -1040,7 +1040,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 	throughput := float64(totalRows) / duration.Seconds()
 
-	o.state.CompleteRun(run.ID, "success")
+	o.state.CompleteRun(run.ID, "success", "")
 	o.notifier.MigrationCompleted(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
 	fmt.Println("Resume complete!")
 
@@ -1106,6 +1106,9 @@ func (o *Orchestrator) ShowHistory() error {
 		}
 		fmt.Printf("%-10s %-20s %-20s %-10s %-30s\n",
 			r.ID, r.StartedAt.Format("2006-01-02 15:04:05"), completed, r.Status, runOrigin(&r))
+		if r.Error != "" {
+			fmt.Printf("           Error: %s\n", r.Error)
+		}
 	}
 
 	fmt.Println("\nUse 'history --run <ID>' to view run configuration")
@@ -1124,6 +1127,9 @@ func (o *Orchestrator) ShowRunDetails(runID string) error {
 
 	fmt.Printf("Run ID:        %s\n", run.ID)
 	fmt.Printf("Status:        %s\n", run.Status)
+	if run.Error != "" {
+		fmt.Printf("Error:         %s\n", run.Error)
+	}
 	fmt.Printf("Started:       %s\n", run.StartedAt.Format("2006-01-02 15:04:05"))
 	if run.CompletedAt != nil {
 		fmt.Printf("Completed:     %s\n", run.CompletedAt.Format("2006-01-02 15:04:05"))

@@ -26,6 +26,7 @@ type fileStateData struct {
 	StartedAt    time.Time             `yaml:"started_at"`
 	CompletedAt  *time.Time            `yaml:"completed_at,omitempty"`
 	Status       string                `yaml:"status"` // running, success, failed
+	Error        string                `yaml:"error,omitempty"`
 	SourceSchema string                `yaml:"source_schema"`
 	TargetSchema string                `yaml:"target_schema"`
 	ConfigHash   string                `yaml:"config_hash,omitempty"`
@@ -108,7 +109,7 @@ func (fs *FileState) CreateRun(id, sourceSchema, targetSchema string, config any
 }
 
 // CompleteRun marks the run as complete.
-func (fs *FileState) CompleteRun(id string, status string) error {
+func (fs *FileState) CompleteRun(id string, status string, errorMsg string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
@@ -119,6 +120,7 @@ func (fs *FileState) CompleteRun(id string, status string) error {
 	now := time.Now()
 	fs.state.Status = status
 	fs.state.CompletedAt = &now
+	fs.state.Error = errorMsg
 
 	return fs.save()
 }
@@ -328,6 +330,7 @@ func (fs *FileState) GetAllRuns() ([]Run, error) {
 				StartedAt:    fs.state.StartedAt,
 				CompletedAt:  fs.state.CompletedAt,
 				Status:       fs.state.Status,
+				Error:        fs.state.Error,
 				SourceSchema: fs.state.SourceSchema,
 				TargetSchema: fs.state.TargetSchema,
 				ProfileName:  fs.state.ProfileName,
@@ -349,6 +352,7 @@ func (fs *FileState) GetRunByID(runID string) (*Run, error) {
 			StartedAt:    fs.state.StartedAt,
 			CompletedAt:  fs.state.CompletedAt,
 			Status:       fs.state.Status,
+			Error:        fs.state.Error,
 			SourceSchema: fs.state.SourceSchema,
 			TargetSchema: fs.state.TargetSchema,
 			ProfileName:  fs.state.ProfileName,
