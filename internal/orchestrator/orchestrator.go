@@ -524,6 +524,9 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			// Mark task as running when worker starts processing
+			o.state.UpdateTaskStatus(j.TaskID, "running", "")
+
 			stats, err := transfer.Execute(ctx, o.sourcePool, o.targetPool, o.config, j, o.progress)
 
 			// Update table stats and completion tracking
@@ -532,9 +535,14 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			if err != nil {
 				ts.jobsFailed++
 				ts.mu.Unlock()
+				// Mark this task as failed
+				o.state.UpdateTaskStatus(j.TaskID, "failed", err.Error())
 				errCh <- fmt.Errorf("transfer %s: %w", j.Table.FullName(), err)
 				return
 			}
+
+			// Mark this task/partition as complete
+			o.state.UpdateTaskStatus(j.TaskID, "success", "")
 
 			if stats != nil {
 				ts.stats.QueryTime += stats.QueryTime
@@ -544,7 +552,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			}
 			ts.jobsComplete++
 
-			// If all jobs for this table are complete, mark task as success
+			// If all jobs for this table are complete, mark table task as success
 			if ts.jobsComplete == tableJobs[j.Table.Name] && ts.jobsFailed == 0 {
 				taskKey := fmt.Sprintf("transfer:%s.%s", j.Table.Schema, j.Table.Name)
 				o.markTableComplete(runID, taskKey)
