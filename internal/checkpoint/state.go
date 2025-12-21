@@ -138,6 +138,7 @@ func (s *State) migrate() error {
 
 	CREATE TABLE IF NOT EXISTS profiles (
 		name TEXT PRIMARY KEY,
+		description TEXT,
 		config_enc BLOB NOT NULL,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
@@ -152,6 +153,9 @@ func (s *State) migrate() error {
 	}
 
 	if err := s.ensureRunColumns(); err != nil {
+		return err
+	}
+	if err := s.ensureProfileColumns(); err != nil {
 		return err
 	}
 
@@ -187,6 +191,28 @@ func (s *State) ensureRunColumns() error {
 		}
 	}
 
+	return nil
+}
+
+func (s *State) ensureProfileColumns() error {
+	columns, err := s.tableColumns("profiles")
+	if err != nil {
+		return err
+	}
+
+	hasDescription := false
+	for _, col := range columns {
+		if col == "description" {
+			hasDescription = true
+			break
+		}
+	}
+
+	if !hasDescription {
+		if _, err := s.db.Exec(`ALTER TABLE profiles ADD COLUMN description TEXT`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

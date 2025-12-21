@@ -19,13 +19,14 @@ const (
 )
 
 type ProfileInfo struct {
-	Name      string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Name        string
+	Description string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // SaveProfile stores an encrypted config profile.
-func (s *State) SaveProfile(name string, config []byte) error {
+func (s *State) SaveProfile(name, description string, config []byte) error {
 	if name == "" {
 		return fmt.Errorf("profile name is required")
 	}
@@ -36,12 +37,13 @@ func (s *State) SaveProfile(name string, config []byte) error {
 	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO profiles (name, config_enc, created_at, updated_at)
-		VALUES (?, ?, datetime('now'), datetime('now'))
+		INSERT INTO profiles (name, description, config_enc, created_at, updated_at)
+		VALUES (?, ?, ?, datetime('now'), datetime('now'))
 		ON CONFLICT(name) DO UPDATE SET
+			description = excluded.description,
 			config_enc = excluded.config_enc,
 			updated_at = datetime('now')
-	`, name, enc)
+	`, name, description, enc)
 	return err
 }
 
@@ -64,7 +66,7 @@ func (s *State) DeleteProfile(name string) error {
 // ListProfiles returns stored profile names with timestamps.
 func (s *State) ListProfiles() ([]ProfileInfo, error) {
 	rows, err := s.db.Query(`
-		SELECT name, created_at, updated_at
+		SELECT name, description, created_at, updated_at
 		FROM profiles
 		ORDER BY name
 	`)
@@ -77,7 +79,7 @@ func (s *State) ListProfiles() ([]ProfileInfo, error) {
 	for rows.Next() {
 		var p ProfileInfo
 		var createdAtStr, updatedAtStr string
-		if err := rows.Scan(&p.Name, &createdAtStr, &updatedAtStr); err != nil {
+		if err := rows.Scan(&p.Name, &p.Description, &createdAtStr, &updatedAtStr); err != nil {
 			return nil, err
 		}
 		p.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)

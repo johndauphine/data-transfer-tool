@@ -872,8 +872,16 @@ func parseProfileSaveArgs(parts []string) (string, string) {
 	if len(parts) < 3 {
 		return "", "config.yaml"
 	}
-	name := parts[2]
+
+	name := ""
 	configFile := "config.yaml"
+
+	if strings.HasPrefix(parts[2], "@") {
+		configFile = parts[2][1:]
+	} else {
+		name = parts[2]
+	}
+
 	if len(parts) > 3 {
 		if strings.HasPrefix(parts[3], "@") {
 			configFile = parts[3][1:]
@@ -881,6 +889,7 @@ func parseProfileSaveArgs(parts []string) (string, string) {
 			configFile = parts[3]
 		}
 	}
+
 	return name, configFile
 }
 
@@ -934,6 +943,14 @@ func (m Model) profileSaveCmd(name, configFile string) tea.Cmd {
 		if err != nil {
 			return OutputMsg(fmt.Sprintf("Error loading config: %v\n", err))
 		}
+		if name == "" {
+			if cfg.Profile.Name != "" {
+				name = cfg.Profile.Name
+			} else {
+				base := filepath.Base(configFile)
+				name = strings.TrimSuffix(base, filepath.Ext(base))
+			}
+		}
 		payload, err := yaml.Marshal(cfg)
 		if err != nil {
 			return OutputMsg(fmt.Sprintf("Error encoding config: %v\n", err))
@@ -949,7 +966,10 @@ func (m Model) profileSaveCmd(name, configFile string) tea.Cmd {
 		}
 		defer state.Close()
 
-		if err := state.SaveProfile(name, payload); err != nil {
+		if err := state.SaveProfile(name, cfg.Profile.Description, payload); err != nil {
+			if strings.Contains(err.Error(), "MSSQL_PG_MIGRATE_MASTER_KEY is not set") {
+				return OutputMsg("Error saving profile: MSSQL_PG_MIGRATE_MASTER_KEY is not set. Start the TUI with the env var set.\n")
+			}
 			return OutputMsg(fmt.Sprintf("Error saving profile: %v\n", err))
 		}
 		return OutputMsg(fmt.Sprintf("Saved profile %q\n", name))
@@ -977,10 +997,12 @@ func (m Model) profileListCmd() tea.Cmd {
 		}
 
 		var b strings.Builder
-		fmt.Fprintf(&b, "%-20s %-20s %-20s\n", "Name", "Created", "Updated")
+		fmt.Fprintf(&b, "%-20s %-40s %-20s %-20s\n", "Name", "Description", "Created", "Updated")
 		for _, p := range profiles {
-			fmt.Fprintf(&b, "%-20s %-20s %-20s\n",
+			desc := strings.ReplaceAll(strings.TrimSpace(p.Description), "\n", " ")
+			fmt.Fprintf(&b, "%-20s %-40s %-20s %-20s\n",
 				p.Name,
+				desc,
 				p.CreatedAt.Format("2006-01-02 15:04:05"),
 				p.UpdatedAt.Format("2006-01-02 15:04:05"))
 		}

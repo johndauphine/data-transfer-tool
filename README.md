@@ -62,9 +62,21 @@ MSSQL_PG_MIGRATE_MASTER_KEY=... ./mssql-pg-migrate run --profile prod
 MSSQL_PG_MIGRATE_MASTER_KEY=... ./mssql-pg-migrate profile export --name prod --out config.yaml
 ```
 
+**YAML profile name (optional)**
+```yaml
+profile:
+  name: prod
+  description: |
+    Production profile for nightly migrations.
+    Uses MSSQL source and PostgreSQL target.
+```
+
+If `profile.name` is present, `profile save` can infer the name when `--name` is omitted.
+
 **TUI workflow**
 ```
 /profile save prod @config.yaml
+/profile save @config.yaml      # infers name from profile.name or filename
 /profile list
 /run --profile prod
 /profile export prod @config.yaml

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
@@ -340,11 +342,19 @@ func loadProfileConfig(name string) (*config.Config, error) {
 }
 
 func saveProfile(c *cli.Context) error {
-	name := c.String("name")
 	configPath := c.String("config")
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
+	}
+	name := c.String("name")
+	if name == "" {
+		if cfg.Profile.Name != "" {
+			name = cfg.Profile.Name
+		} else {
+			base := filepath.Base(configPath)
+			name = strings.TrimSuffix(base, filepath.Ext(base))
+		}
 	}
 	payload, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -361,7 +371,10 @@ func saveProfile(c *cli.Context) error {
 	}
 	defer state.Close()
 
-	if err := state.SaveProfile(name, payload); err != nil {
+	if err := state.SaveProfile(name, cfg.Profile.Description, payload); err != nil {
+		if strings.Contains(err.Error(), "MSSQL_PG_MIGRATE_MASTER_KEY is not set") {
+			return fmt.Errorf("MSSQL_PG_MIGRATE_MASTER_KEY is not set; set it before saving profiles")
+		}
 		return err
 	}
 	fmt.Printf("Saved profile %q\n", name)
@@ -387,10 +400,12 @@ func listProfiles(c *cli.Context) error {
 		fmt.Println("No profiles found")
 		return nil
 	}
-	fmt.Printf("%-20s %-20s %-20s\n", "Name", "Created", "Updated")
+	fmt.Printf("%-20s %-40s %-20s %-20s\n", "Name", "Description", "Created", "Updated")
 	for _, p := range profiles {
-		fmt.Printf("%-20s %-20s %-20s\n",
+		desc := strings.ReplaceAll(strings.TrimSpace(p.Description), "\n", " ")
+		fmt.Printf("%-20s %-40s %-20s %-20s\n",
 			p.Name,
+			desc,
 			p.CreatedAt.Format("2006-01-02 15:04:05"),
 			p.UpdatedAt.Format("2006-01-02 15:04:05"))
 	}

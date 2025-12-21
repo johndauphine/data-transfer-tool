@@ -42,6 +42,13 @@ type Config struct {
 	Target    TargetConfig    `yaml:"target"`
 	Migration MigrationConfig `yaml:"migration"`
 	Slack     SlackConfig     `yaml:"slack"`
+	Profile   ProfileConfig   `yaml:"profile,omitempty"`
+}
+
+// ProfileConfig holds optional profile metadata.
+type ProfileConfig struct {
+	Name        string `yaml:"name,omitempty"`
+	Description string `yaml:"description,omitempty"`
 }
 
 // SlackConfig holds Slack notification settings
