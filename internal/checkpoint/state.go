@@ -39,6 +39,7 @@ type Run struct {
 	StartedAt    time.Time
 	CompletedAt  *time.Time
 	Status       string
+	Phase        string // Current phase: initializing, transferring, finalizing, validating, complete
 	SourceSchema string
 	TargetSchema string
 	Config       string
@@ -106,6 +107,7 @@ func (s *State) migrate() error {
 		started_at TEXT NOT NULL,
 		completed_at TEXT,
 		status TEXT NOT NULL DEFAULT 'running',
+		phase TEXT NOT NULL DEFAULT 'initializing',
 		source_schema TEXT NOT NULL,
 		target_schema TEXT NOT NULL,
 		config TEXT,
@@ -180,6 +182,7 @@ func (s *State) ensureRunColumns() error {
 	needsProfile := true
 	needsConfigPath := true
 	needsError := true
+	needsPhase := true
 	for _, col := range columns {
 		switch col {
 		case "profile_name":
@@ -188,6 +191,8 @@ func (s *State) ensureRunColumns() error {
 			needsConfigPath = false
 		case "error":
 			needsError = false
+		case "phase":
+			needsPhase = false
 		}
 	}
 
@@ -203,6 +208,11 @@ func (s *State) ensureRunColumns() error {
 	}
 	if needsError {
 		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN error TEXT`); err != nil {
+			return err
+		}
+	}
+	if needsPhase {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN phase TEXT DEFAULT 'initializing'`); err != nil {
 			return err
 		}
 	}
@@ -346,12 +356,12 @@ func (s *State) CompleteRun(id string, status string, errorMsg string) error {
 func (s *State) GetLastIncompleteRun() (*Run, error) {
 	var r Run
 	var startedAtStr string
-	var profileName, configPath sql.NullString
+	var profileName, configPath, phase sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, started_at, status, source_schema, target_schema, profile_name, config_path
+		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema, profile_name, config_path
 		FROM runs WHERE status = 'running'
 		ORDER BY started_at DESC LIMIT 1
-	`).Scan(&r.ID, &startedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath)
+	`).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -366,7 +376,16 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 	if configPath.Valid {
 		r.ConfigPath = configPath.String
 	}
+	if phase.Valid {
+		r.Phase = phase.String
+	}
 	return &r, nil
+}
+
+// UpdatePhase updates the current phase of a migration run
+func (s *State) UpdatePhase(runID, phase string) error {
+	_, err := s.db.Exec(`UPDATE runs SET phase = ? WHERE id = ?`, phase, runID)
+	return err
 }
 
 // HasSuccessfulRunAfter checks if there's a successful run that supersedes the given incomplete run.

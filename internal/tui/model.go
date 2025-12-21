@@ -962,10 +962,11 @@ func (m Model) runStatusCmd(configFile, profileName string) tea.Cmd {
 		defer orch.Close()
 
 		// Capture stdout for ShowStatus
-		if err := orch.ShowStatus(); err != nil {
+		output, err := CaptureToString(orch.ShowStatus)
+		if err != nil {
 			return OutputMsg(fmt.Sprintf("Error showing status: %v\n", err))
 		}
-		return nil
+		return OutputMsg(output)
 	}
 }
 
@@ -981,16 +982,19 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 		}
 		defer orch.Close()
 
+		var output string
 		if runID != "" {
-			if err := orch.ShowRunDetails(runID); err != nil {
+			output, err = CaptureToString(func() error { return orch.ShowRunDetails(runID) })
+			if err != nil {
 				return OutputMsg(fmt.Sprintf("Error showing run details: %v\n", err))
 			}
 		} else {
-			if err := orch.ShowHistory(); err != nil {
+			output, err = CaptureToString(orch.ShowHistory)
+			if err != nil {
 				return OutputMsg(fmt.Sprintf("Error showing history: %v\n", err))
 			}
 		}
-		return nil
+		return OutputMsg(output)
 	}
 }
 

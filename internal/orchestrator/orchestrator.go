@@ -253,6 +253,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Transfer data
 	fmt.Println("Transferring data...")
+	o.state.UpdatePhase(runID, "transferring")
 	if err := o.transferAll(ctx, runID, tables); err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -266,6 +267,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Finalize
 	fmt.Println("Finalizing...")
+	o.state.UpdatePhase(runID, "finalizing")
 	if err := o.finalize(ctx, tables); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
@@ -274,6 +276,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Validate
 	fmt.Println("Validating...")
+	o.state.UpdatePhase(runID, "validating")
 	if err := o.Validate(ctx); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
@@ -1082,23 +1085,35 @@ func (o *Orchestrator) ShowStatus() error {
 		return err
 	}
 
-	if running == 0 {
+	// Use phase to determine if migration is active vs interrupted
+	// Phases: initializing -> transferring -> finalizing -> validating -> complete
+	phase := run.Phase
+	if phase == "" {
+		phase = "initializing"
+	}
+
+	// Determine if migration is actually interrupted vs still starting up:
+	// - If in transferring phase with no running tasks but some tasks completed/failed,
+	//   workers started and stopped -> interrupted
+	// - If all tasks are pending and none have run yet, could still be initializing workers
+	workersStarted := success > 0 || failed > 0
+	if phase == "transferring" && running == 0 && pending > 0 && workersStarted {
 		fmt.Printf("No active migration (last incomplete run: %s)\n", run.ID)
-		if pending > 0 {
-			fmt.Printf("Status: interrupted (pending tasks)\n")
-			fmt.Printf("Started: %s\n", run.StartedAt.Format(time.RFC3339))
-			fmt.Printf("Tasks: %d total, %d pending, %d running, %d success, %d failed\n",
-				total, pending, running, success, failed)
-			fmt.Println("Run 'resume' to continue.")
-		}
+		fmt.Printf("Status: interrupted (pending tasks)\n")
+		fmt.Printf("Started: %s\n", run.StartedAt.Format(time.RFC3339))
+		fmt.Printf("Tasks: %d total, %d pending, %d running, %d success, %d failed\n",
+			total, pending, running, success, failed)
+		fmt.Println("Run 'resume' to continue.")
 		return nil
 	}
 
 	fmt.Printf("Run: %s\n", run.ID)
-	fmt.Printf("Status: %s\n", run.Status)
+	fmt.Printf("Status: %s (%s)\n", run.Status, phase)
 	fmt.Printf("Started: %s\n", run.StartedAt.Format(time.RFC3339))
-	fmt.Printf("Tasks: %d total, %d pending, %d running, %d success, %d failed\n",
-		total, pending, running, success, failed)
+	if total > 0 {
+		fmt.Printf("Tasks: %d total, %d pending, %d running, %d success, %d failed\n",
+			total, pending, running, success, failed)
+	}
 
 	return nil
 }

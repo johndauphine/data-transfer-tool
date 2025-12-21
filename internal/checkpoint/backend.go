@@ -9,6 +9,7 @@ type StateBackend interface {
 	GetLastIncompleteRun() (*Run, error)
 	HasSuccessfulRunAfter(run *Run) (bool, error) // Check if a successful run supersedes this incomplete run
 	MarkRunAsResumed(runID string) error
+	UpdatePhase(runID, phase string) error
 
 	// Task management
 	CreateTask(runID, taskType, taskKey string) (int64, error)

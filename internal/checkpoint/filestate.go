@@ -26,6 +26,7 @@ type fileStateData struct {
 	StartedAt    time.Time             `yaml:"started_at"`
 	CompletedAt  *time.Time            `yaml:"completed_at,omitempty"`
 	Status       string                `yaml:"status"` // running, success, failed
+	Phase        string                `yaml:"phase"`  // initializing, transferring, finalizing, validating, complete
 	Error        string                `yaml:"error,omitempty"`
 	SourceSchema string                `yaml:"source_schema"`
 	TargetSchema string                `yaml:"target_schema"`
@@ -134,10 +135,15 @@ func (fs *FileState) GetLastIncompleteRun() (*Run, error) {
 		return nil, nil
 	}
 
+	phase := fs.state.Phase
+	if phase == "" {
+		phase = "initializing"
+	}
 	return &Run{
 		ID:           fs.state.RunID,
 		StartedAt:    fs.state.StartedAt,
 		Status:       fs.state.Status,
+		Phase:        phase,
 		SourceSchema: fs.state.SourceSchema,
 		TargetSchema: fs.state.TargetSchema,
 		ProfileName:  fs.state.ProfileName,
@@ -166,6 +172,18 @@ func (fs *FileState) MarkRunAsResumed(runID string) error {
 	}
 
 	return fs.save()
+}
+
+// UpdatePhase updates the current phase of a migration run.
+func (fs *FileState) UpdatePhase(runID, phase string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.state != nil && fs.state.RunID == runID {
+		fs.state.Phase = phase
+		return fs.save()
+	}
+	return nil
 }
 
 // taskIDCounter generates synthetic task IDs for file-based state.
