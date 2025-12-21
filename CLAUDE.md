@@ -155,6 +155,19 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - `github.com/urfave/cli/v2`: Command-line argument parsing
 - `modernc.org/sqlite`: Pure-Go SQLite driver
 
+## Development Workflow
+
+### Git Branching
+- **Always create a feature/fix branch before making code changes**
+- Never commit directly to main
+- Merge to main only after testing
+- Delete branches after merging
+
+### Testing
+- Run `go build ./...` before committing
+- Run `golangci-lint run --timeout=5m` to check for lint errors
+- Test changes manually before pushing
+
 ## Code Patterns
 
 ### Config Loading
