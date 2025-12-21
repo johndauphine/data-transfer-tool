@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 )
 
 // OutputMsg is sent when new stdout/stderr output is captured
@@ -25,6 +26,10 @@ func CaptureOutput(p *tea.Program, migrationID string) func() {
 
 	os.Stdout = w
 	os.Stderr = w
+
+	// Redirect logging to the pipe and enable simple mode (no timestamps in TUI)
+	logging.SetOutput(w)
+	logging.SetSimpleMode(true)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -51,6 +56,9 @@ func CaptureOutput(p *tea.Program, migrationID string) func() {
 		w.Close()
 		os.Stdout = origStdout
 		os.Stderr = origStderr
+		// Restore logging to stdout and disable simple mode
+		logging.SetOutput(origStdout)
+		logging.SetSimpleMode(false)
 		// We don't wait for wg because scanner.Scan blocks until EOF
 		// and we want to restore immediately.
 		// However, to ensure last bytes are read, we could wait a tiny bit.

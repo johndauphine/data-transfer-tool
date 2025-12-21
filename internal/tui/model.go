@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
 	"gopkg.in/yaml.v3"
 )
@@ -1601,12 +1602,13 @@ func (m Model) runMigrationCmdWithID(configFile, profileName, migrationID, label
 		migrationCancels[migrationID] = cancel
 		defer delete(migrationCancels, migrationID)
 
-		// Redirect stdout/stderr to this migration's output
+		// Redirect stdout/stderr and logging to this migration's output
 		r, w, _ := os.Pipe()
 		origStdout := os.Stdout
 		origStderr := os.Stderr
 		os.Stdout = w
 		os.Stderr = w
+		logging.SetOutput(w)
 
 		// Reader goroutine
 		done := make(chan struct{})
@@ -1627,10 +1629,11 @@ func (m Model) runMigrationCmdWithID(configFile, profileName, migrationID, label
 		// Run migration
 		runErr := orch.Run(ctx)
 
-		// Restore stdout/stderr
+		// Restore stdout/stderr and logging
 		w.Close()
 		os.Stdout = origStdout
 		os.Stderr = origStderr
+		logging.SetOutput(origStdout)
 		<-done // Wait for reader to finish
 
 		if runErr != nil {
@@ -1679,12 +1682,13 @@ func (m Model) runResumeCmdWithID(configFile, profileName, migrationID, label st
 		migrationCancels[migrationID] = cancel
 		defer delete(migrationCancels, migrationID)
 
-		// Redirect stdout/stderr to this migration's output
+		// Redirect stdout/stderr and logging to this migration's output
 		r, w, _ := os.Pipe()
 		origStdout := os.Stdout
 		origStderr := os.Stderr
 		os.Stdout = w
 		os.Stderr = w
+		logging.SetOutput(w)
 
 		// Reader goroutine
 		done := make(chan struct{})
@@ -1705,10 +1709,11 @@ func (m Model) runResumeCmdWithID(configFile, profileName, migrationID, label st
 		// Run resume
 		runErr := orch.Resume(ctx)
 
-		// Restore stdout/stderr
+		// Restore stdout/stderr and logging
 		w.Close()
 		os.Stdout = origStdout
 		os.Stderr = origStderr
+		logging.SetOutput(origStdout)
 		<-done // Wait for reader to finish
 
 		if runErr != nil {

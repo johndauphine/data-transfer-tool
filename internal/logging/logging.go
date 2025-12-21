@@ -25,9 +25,10 @@ const (
 
 // Logger provides leveled logging
 type Logger struct {
-	mu     sync.Mutex
-	level  Level
-	output io.Writer
+	mu         sync.Mutex
+	level      Level
+	output     io.Writer
+	simpleMode bool // When true, skip timestamps and level prefixes (for TUI)
 }
 
 var (
@@ -90,6 +91,21 @@ func GetLevel() Level {
 	return defaultLogger.level
 }
 
+// SetSimpleMode enables/disables simple mode (no timestamps or level prefixes)
+// Used by TUI to get clean output without timestamps cluttering the display
+func SetSimpleMode(enabled bool) {
+	defaultLogger.mu.Lock()
+	defer defaultLogger.mu.Unlock()
+	defaultLogger.simpleMode = enabled
+}
+
+// IsSimpleMode returns whether simple mode is enabled
+func IsSimpleMode() bool {
+	defaultLogger.mu.Lock()
+	defer defaultLogger.mu.Unlock()
+	return defaultLogger.simpleMode
+}
+
 // Debug logs a debug message
 func Debug(format string, args ...interface{}) {
 	defaultLogger.log(LevelDebug, format, args...)
@@ -139,11 +155,18 @@ func (l *Logger) log(level Level, format string, args ...interface{}) {
 		fmt.Fprint(l.output, "\n")
 	}
 
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	if !strings.HasSuffix(msg, "\n") {
 		msg += "\n"
 	}
-	fmt.Fprintf(l.output, "%s [%s] %s", timestamp, level.String(), msg)
+
+	if l.simpleMode {
+		// Simple mode: just output the message without timestamps or level prefixes
+		fmt.Fprint(l.output, msg)
+	} else {
+		// Full mode: include timestamp and level prefix
+		timestamp := time.Now().Format("2006-01-02 15:04:05")
+		fmt.Fprintf(l.output, "%s [%s] %s", timestamp, level.String(), msg)
+	}
 }
 
 // IsDebug returns true if debug level is enabled
