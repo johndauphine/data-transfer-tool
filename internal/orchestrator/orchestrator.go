@@ -1104,14 +1104,13 @@ func (o *Orchestrator) ShowStatus() error {
 		phase = "initializing"
 	}
 
-	// Determine if migration is actually interrupted vs still starting up:
-	// - If in transferring phase with no running tasks but some tasks completed/failed,
-	//   workers started and stopped -> interrupted
-	// - If all tasks are pending and none have run yet, could still be initializing workers
-	workersStarted := success > 0 || failed > 0
-	if phase == "transferring" && running == 0 && pending > 0 && workersStarted {
-		fmt.Printf("No active migration (last incomplete run: %s)\n", run.ID)
-		fmt.Printf("Status: interrupted (pending tasks)\n")
+	// Determine if migration is interrupted:
+	// If in transferring phase with no running tasks and pending tasks remain,
+	// the migration was cancelled or crashed. Workers would be actively processing
+	// if the migration were truly running.
+	if phase == "transferring" && running == 0 && pending > 0 {
+		fmt.Printf("Run: %s\n", run.ID)
+		fmt.Printf("Status: interrupted (%d/%d tables completed)\n", success, total)
 		fmt.Printf("Started: %s\n", run.StartedAt.Format(time.RFC3339))
 		fmt.Printf("Tasks: %d total, %d pending, %d running, %d success, %d failed\n",
 			total, pending, running, success, failed)
