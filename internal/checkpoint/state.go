@@ -362,6 +362,27 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 	return &r, nil
 }
 
+// HasSuccessfulRunAfter checks if there's a successful run that supersedes the given incomplete run.
+// A run is superseded if a later successful run exists with the same source and target schemas.
+func (s *State) HasSuccessfulRunAfter(run *Run) (bool, error) {
+	if run == nil {
+		return false, nil
+	}
+
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM runs
+		WHERE status = 'success'
+		AND source_schema = ?
+		AND target_schema = ?
+		AND started_at > ?
+	`, run.SourceSchema, run.TargetSchema, run.StartedAt.Format("2006-01-02 15:04:05")).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // CreateTask creates a new task or returns existing task ID
 func (s *State) CreateTask(runID, taskType, taskKey string) (int64, error) {
 	// Try to insert new task

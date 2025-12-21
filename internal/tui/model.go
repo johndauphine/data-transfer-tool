@@ -64,6 +64,10 @@ type Model struct {
 	suggestionIdx int      // Currently selected suggestion index
 	lastInput     string   // Last input value to prevent unnecessary suggestion regeneration
 
+	// Migration state
+	migrationRunning bool               // True while a migration is in progress
+	migrationCancel  context.CancelFunc // Cancel function for running migration
+
 	// Wizard state
 	mode        sessionMode
 	step        wizardStep
@@ -100,6 +104,15 @@ type WizardFinishedMsg struct {
 	Err     error
 	Message string
 }
+
+// MigrationDoneMsg signals that a migration has completed
+type MigrationDoneMsg struct {
+	Output string
+}
+
+// activeMigrationCancel holds the cancel function for the currently running migration.
+// This is package-level so Ctrl+C can access it to cancel the migration.
+var activeMigrationCancel context.CancelFunc
 
 // Init initializes the model
 func (m Model) Init() tea.Cmd {
@@ -205,7 +218,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
+		case tea.KeyCtrlC:
+			// If a migration is running, cancel it instead of quitting
+			if m.migrationRunning && activeMigrationCancel != nil {
+				activeMigrationCancel()
+				m.logBuffer += styleSystemOutput.Render("Cancelling migration... please wait") + "\n"
+				m.viewport.SetContent(m.logBuffer)
+				m.viewport.GotoBottom()
+				return m, nil
+			}
+			return m, tea.Quit
+		case tea.KeyEsc:
 			return m, tea.Quit
 		case tea.KeyEnter:
 			value := m.textInput.Value()
@@ -220,6 +243,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.Reset()
 				m.history = append(m.history, value)
 				m.historyIdx = len(m.history)
+
+				// Check if this is a migration command and set the running flag
+				cmd := strings.Fields(value)[0]
+				if cmd == "/run" || cmd == "/resume" {
+					m.migrationRunning = true
+				}
+
 				return m, m.handleCommand(value)
 			}
 		case tea.KeyUp:
@@ -272,6 +302,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.logBuffer += "\n" + text + "\n"
+		m.viewport.SetContent(m.logBuffer)
+		m.viewport.GotoBottom()
+
+	case MigrationDoneMsg:
+		// Migration completed - clear the running state
+		m.migrationRunning = false
+		activeMigrationCancel = nil
+		// Process the output the same way as OutputMsg
+		m.lineBuffer += msg.Output
+		for {
+			newlineIdx := strings.Index(m.lineBuffer, "\n")
+			if newlineIdx == -1 {
+				break
+			}
+			line := m.lineBuffer[:newlineIdx]
+			m.lineBuffer = m.lineBuffer[newlineIdx+1:]
+			if line == "" {
+				continue
+			}
+			// Style the line based on content
+			var styledLine string
+			if strings.Contains(line, "Error") || strings.Contains(line, "failed") || strings.Contains(line, "obsolete") {
+				styledLine = styleError.Render("✖ " + line)
+			} else if strings.Contains(line, "success") || strings.Contains(line, "completed") {
+				styledLine = styleSuccess.Render("✔ " + line)
+			} else {
+				styledLine = styleSystemOutput.Render("  " + line)
+			}
+			m.logBuffer += styledLine + "\n"
+		}
 		m.viewport.SetContent(m.logBuffer)
 		m.viewport.GotoBottom()
 
@@ -702,13 +762,15 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 		// Load config
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
-			return OutputMsg(out + fmt.Sprintf("Error loading config: %v\n", err))
+			activeMigrationCancel = nil
+			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error loading config: %v\n", err)}
 		}
 
 		// Create orchestrator
 		orch, err := orchestrator.New(cfg)
 		if err != nil {
-			return OutputMsg(out + fmt.Sprintf("Error initializing orchestrator: %v\n", err))
+			activeMigrationCancel = nil
+			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
 		}
 		defer orch.Close()
 		if profileName != "" {
@@ -717,12 +779,17 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 			orch.SetRunContext("", configFile)
 		}
 
+		// Create cancellable context for Ctrl+C support
+		ctx, cancel := context.WithCancel(context.Background())
+		activeMigrationCancel = cancel
+		defer func() { activeMigrationCancel = nil }()
+
 		// Run
-		if err := orch.Run(context.Background()); err != nil {
-			return OutputMsg(out + fmt.Sprintf("Migration failed: %v\n", err))
+		if err := orch.Run(ctx); err != nil {
+			return MigrationDoneMsg{Output: out + fmt.Sprintf("Migration failed: %v\n", err)}
 		}
 
-		return OutputMsg(out + "Migration completed successfully!\n")
+		return MigrationDoneMsg{Output: out + "Migration completed successfully!\n"}
 	}
 }
 
@@ -736,12 +803,14 @@ func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
-			return OutputMsg(out + fmt.Sprintf("Error loading config: %v\n", err))
+			activeMigrationCancel = nil
+			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error loading config: %v\n", err)}
 		}
 
 		orch, err := orchestrator.New(cfg)
 		if err != nil {
-			return OutputMsg(out + fmt.Sprintf("Error initializing orchestrator: %v\n", err))
+			activeMigrationCancel = nil
+			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
 		}
 		defer orch.Close()
 		if profileName != "" {
@@ -750,11 +819,16 @@ func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 			orch.SetRunContext("", configFile)
 		}
 
-		if err := orch.Resume(context.Background()); err != nil {
-			return OutputMsg(out + fmt.Sprintf("Resume failed: %v\n", err))
+		// Create cancellable context for Ctrl+C support
+		ctx, cancel := context.WithCancel(context.Background())
+		activeMigrationCancel = cancel
+		defer func() { activeMigrationCancel = nil }()
+
+		if err := orch.Resume(ctx); err != nil {
+			return MigrationDoneMsg{Output: out + fmt.Sprintf("Resume failed: %v\n", err)}
 		}
 
-		return OutputMsg(out + "Resume completed successfully!\n")
+		return MigrationDoneMsg{Output: out + "Resume completed successfully!\n"}
 	}
 }
 

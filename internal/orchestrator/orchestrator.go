@@ -865,6 +865,17 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		return fmt.Errorf("no incomplete run found - use 'run' to start a new migration")
 	}
 
+	// Check if this incomplete run has been superseded by a later successful run
+	superseded, err := o.state.HasSuccessfulRunAfter(run)
+	if err != nil {
+		return fmt.Errorf("checking for superseding runs: %w", err)
+	}
+	if superseded {
+		// Mark the old incomplete run as failed since it's obsolete
+		o.state.CompleteRun(run.ID, "failed", "superseded by later successful migration")
+		return fmt.Errorf("incomplete run %s is obsolete - a later migration with the same schemas completed successfully. Use 'run' to start a new migration", run.ID)
+	}
+
 	startTime := time.Now()
 	fmt.Printf("Resuming run: %s (started %s)\n", run.ID, run.StartedAt.Format(time.RFC3339))
 

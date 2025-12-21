@@ -145,6 +145,14 @@ func (fs *FileState) GetLastIncompleteRun() (*Run, error) {
 	}, nil
 }
 
+// HasSuccessfulRunAfter checks if there's a successful run that supersedes the given incomplete run.
+// For file state, this always returns false - we only track one run at a time,
+// so if there's an incomplete run, it's the only run we know about.
+func (fs *FileState) HasSuccessfulRunAfter(run *Run) (bool, error) {
+	// File state only tracks one run - if it's incomplete, there's no later successful run
+	return false, nil
+}
+
 // MarkRunAsResumed resets running tasks to pending.
 func (fs *FileState) MarkRunAsResumed(runID string) error {
 	fs.mu.Lock()

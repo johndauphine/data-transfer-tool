@@ -7,6 +7,7 @@ type StateBackend interface {
 	CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error
 	CompleteRun(id string, status string, errorMsg string) error
 	GetLastIncompleteRun() (*Run, error)
+	HasSuccessfulRunAfter(run *Run) (bool, error) // Check if a successful run supersedes this incomplete run
 	MarkRunAsResumed(runID string) error
 
 	// Task management
