@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
@@ -408,7 +409,7 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 	case *target.Pool:
 		// PostgreSQL target
 		var deleteQuery string
-		var result pgx.CommandTag
+		var result pgconn.CommandTag
 		var err error
 		if maxPK != nil {
 			deleteQuery = fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1 AND %q <= $2`,
