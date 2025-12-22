@@ -465,8 +465,12 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			}
 		}
 	}
-	if largeKeysetTables > 0 || largeRowNumTables > 0 {
-		logging.Debug("Calculating partitions for %d large tables...", largeKeysetTables+largeRowNumTables)
+	// Track partition query timing
+	var partitionStartTime time.Time
+	var totalPartitionTime time.Duration
+	if largeKeysetTables > 0 {
+		logging.Info("Calculating partition boundaries for %d large tables...", largeKeysetTables)
+		partitionStartTime = time.Now()
 	}
 
 	for _, t := range tables {
@@ -478,9 +482,10 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				o.config.Migration.MaxPartitions,
 			)
 
-			logging.Debug("Getting partition boundaries for %s (%d rows, %d partitions)...", t.Name, t.RowCount, numPartitions)
+			tableStart := time.Now()
 			partitions, err := o.sourcePool.GetPartitionBoundaries(ctx, &t, numPartitions)
-			logging.Debug("Got partition boundaries for %s: %d partitions", t.Name, len(partitions))
+			tableElapsed := time.Since(tableStart)
+			logging.Info("  %s: %d partitions (%s)", t.Name, len(partitions), tableElapsed.Round(time.Millisecond))
 			if err != nil {
 				return nil, fmt.Errorf("partitioning %s: %w", t.FullName(), err)
 			}
@@ -550,6 +555,12 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				Saver:     progressSaver,
 			})
 		}
+	}
+
+	// Log total partition query time
+	if largeKeysetTables > 0 {
+		totalPartitionTime = time.Since(partitionStartTime)
+		logging.Info("Partition queries completed in %s", totalPartitionTime.Round(time.Millisecond))
 	}
 
 	// Initialize progress
