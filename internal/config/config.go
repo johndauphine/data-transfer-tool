@@ -29,8 +29,9 @@ func expandTilde(path string) string {
 // AutoConfig tracks which values were auto-configured and why
 type AutoConfig struct {
 	// System resources detected
-	AvailableMemoryMB int64
-	CPUCores          int
+	AvailableMemoryMB    int64
+	EffectiveMaxMemoryMB int64 // After applying user limit and 70% cap
+	CPUCores             int
 
 	// Original values (before auto-tuning)
 	OriginalWorkers            int
@@ -140,6 +141,7 @@ type MigrationConfig struct {
 	WriteAheadWriters      int      `yaml:"write_ahead_writers"`      // Number of parallel writers per job (default=2)
 	ParallelReaders        int      `yaml:"parallel_readers"`         // Number of parallel readers per job (default=2)
 	MSSQLRowsPerBatch      int      `yaml:"mssql_rows_per_batch"`     // MSSQL bulk copy hint (default=chunk_size)
+	MaxMemoryMB            int64    `yaml:"max_memory_mb"`            // Max memory to use (default=70% of available, hard cap at 70%)
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -221,7 +223,15 @@ func (c *Config) applyDefaults() {
 	// Detect system resources
 	c.autoConfig.CPUCores = runtime.NumCPU()
 	c.autoConfig.AvailableMemoryMB = getAvailableMemoryMB()
-	c.autoConfig.TargetMemoryMB = c.autoConfig.AvailableMemoryMB / 2 // Use 50% of available RAM
+
+	// Calculate target memory for auto-tuning (50% of limit)
+	// If user specified max_memory_mb, use that as the base
+	// Otherwise use available memory
+	baseMemoryMB := c.autoConfig.AvailableMemoryMB
+	if c.Migration.MaxMemoryMB > 0 && c.Migration.MaxMemoryMB < baseMemoryMB {
+		baseMemoryMB = c.Migration.MaxMemoryMB
+	}
+	c.autoConfig.TargetMemoryMB = baseMemoryMB / 2
 
 	// Source defaults
 	if c.Source.Type == "" {
@@ -352,8 +362,18 @@ func (c *Config) applyDefaults() {
 
 	// MEMORY SAFETY: Ensure we never exceed available memory
 	// Use conservative estimate with 2KB/row (accounts for large text columns)
-	// Limit to 70% of available memory to leave room for OS and other processes
-	maxMemoryBytes := c.autoConfig.AvailableMemoryMB * 1024 * 1024 * 70 / 100
+	// Hard cap at 70% of available memory to leave room for OS and other processes
+	hardCapMB := c.autoConfig.AvailableMemoryMB * 70 / 100
+	effectiveMaxMB := hardCapMB
+	if c.Migration.MaxMemoryMB > 0 {
+		// User specified a limit - use it, but enforce hard cap
+		if c.Migration.MaxMemoryMB < hardCapMB {
+			effectiveMaxMB = c.Migration.MaxMemoryMB
+		}
+		// If user requested more than 70%, silently cap it
+	}
+	c.autoConfig.EffectiveMaxMemoryMB = effectiveMaxMB
+	maxMemoryBytes := effectiveMaxMB * 1024 * 1024
 	conservativeRowSize := int64(2000) // 2KB per row - safer for text-heavy tables
 	for {
 		estimatedMemory := int64(c.Migration.Workers) *
@@ -481,8 +501,8 @@ func (c *Config) RefineSettingsForRowSizes(tables []TableRowSize) (adjusted bool
 	origChunkSize := c.Migration.ChunkSize
 	origBuffers := c.Migration.ReadAheadBuffers
 
-	// Calculate memory limit (70% of available)
-	maxMemoryBytes := c.autoConfig.AvailableMemoryMB * 1024 * 1024 * 70 / 100
+	// Use the effective max memory (already accounts for user limit and 70% cap)
+	maxMemoryBytes := c.autoConfig.EffectiveMaxMemoryMB * 1024 * 1024
 
 	// Iteratively reduce settings if memory estimate exceeds limit
 	iterations := 0
@@ -778,7 +798,10 @@ func (c *Config) DebugDump() string {
 	// System Resources
 	b.WriteString("System Resources:\n")
 	b.WriteString(fmt.Sprintf("  Available Memory: %d MB\n", ac.AvailableMemoryMB))
-	b.WriteString(fmt.Sprintf("  Target Memory (50%%): %d MB\n", ac.TargetMemoryMB))
+	if c.Migration.MaxMemoryMB > 0 {
+		b.WriteString(fmt.Sprintf("  Max Memory Limit: %d MB (user configured)\n", c.Migration.MaxMemoryMB))
+	}
+	b.WriteString(fmt.Sprintf("  Effective Max Memory: %d MB (hard cap 70%%)\n", ac.EffectiveMaxMemoryMB))
 	b.WriteString(fmt.Sprintf("  CPU Cores: %d\n", ac.CPUCores))
 
 	// Source Database
