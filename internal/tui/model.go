@@ -2569,6 +2569,9 @@ func (m *Model) finishWizard() tea.Cmd {
 
 // Start launches the TUI program
 func Start() error {
+	// Enable debug logging by default in TUI mode
+	logging.SetLevel(logging.LevelDebug)
+
 	m := InitialModel()
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 

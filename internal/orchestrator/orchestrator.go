@@ -146,13 +146,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	startTime := time.Now()
 	logging.Info("Starting migration run: %s", runID)
 	logging.Info("Migration: %s -> %s", o.sourcePool.DBType(), o.targetPool.DBType())
-	logging.Debug("Connection pools: source=%d, target=%d",
-		o.sourcePool.MaxConns(), o.targetPool.MaxConns())
 
-	// Log configuration in debug mode
-	if logging.IsDebug() {
-		logging.Debug("Configuration:\n%s", o.config.SanitizedYAML())
-	}
+	// Log comprehensive configuration dump (always visible at INFO level)
+	logging.Info("%s", o.config.DebugDump())
 
 	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
 		return fmt.Errorf("creating run: %w", err)
