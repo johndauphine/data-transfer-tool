@@ -1576,70 +1576,79 @@ func (m Model) runMigrationCmdWithID(configFile, profileName, migrationID, label
 
 		send(fmt.Sprintf("Starting migration [%s] with %s\n", migrationID, label))
 
-		// Load config
-		cfg, err := loadConfigFromOrigin(configFile, profileName)
-		if err != nil {
-			delete(migrationCancels, migrationID)
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error loading config: %v\n", err)}
-		}
-
-		// Create orchestrator
-		orch, err := orchestrator.New(cfg)
-		if err != nil {
-			delete(migrationCancels, migrationID)
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
-		}
-		defer orch.Close()
-
-		if profileName != "" {
-			orch.SetRunContext(profileName, "")
-		} else {
-			orch.SetRunContext("", configFile)
-		}
-
-		// Create cancellable context
-		ctx, cancel := context.WithCancel(context.Background())
-		migrationCancels[migrationID] = cancel
-		defer delete(migrationCancels, migrationID)
-
-		// Redirect stdout/stderr and logging to this migration's output
-		r, w, _ := os.Pipe()
-		origStdout := os.Stdout
-		origStderr := os.Stderr
-		os.Stdout = w
-		os.Stderr = w
-		logging.SetOutput(w)
-
-		// Reader goroutine
-		done := make(chan struct{})
+		// Run migration asynchronously in a goroutine to avoid blocking the UI
 		go func() {
-			defer close(done)
-			buf := make([]byte, 1024)
-			for {
-				n, err := r.Read(buf)
-				if n > 0 {
-					p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
-				}
-				if err != nil {
-					break
-				}
+			// Load config
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				delete(migrationCancels, migrationID)
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error loading config: %v\n", err)})
+				return
 			}
+
+			// Create orchestrator
+			orch, err := orchestrator.New(cfg)
+			if err != nil {
+				delete(migrationCancels, migrationID)
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error initializing orchestrator: %v\n", err)})
+				return
+			}
+			defer orch.Close()
+
+			if profileName != "" {
+				orch.SetRunContext(profileName, "")
+			} else {
+				orch.SetRunContext("", configFile)
+			}
+
+			// Create cancellable context
+			ctx, cancel := context.WithCancel(context.Background())
+			migrationCancels[migrationID] = cancel
+			defer delete(migrationCancels, migrationID)
+
+			// Redirect stdout/stderr and logging to this migration's output
+			r, w, _ := os.Pipe()
+			origStdout := os.Stdout
+			origStderr := os.Stderr
+			os.Stdout = w
+			os.Stderr = w
+			logging.SetOutput(w)
+
+			// Reader goroutine
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				buf := make([]byte, 1024)
+				for {
+					n, err := r.Read(buf)
+					if n > 0 {
+						p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
+					}
+					if err != nil {
+						break
+					}
+				}
+			}()
+
+			// Run migration
+			runErr := orch.Run(ctx)
+
+			// Restore stdout/stderr and logging
+			w.Close()
+			os.Stdout = origStdout
+			os.Stderr = origStderr
+			logging.SetOutput(origStdout)
+			<-done // Wait for reader to finish
+
+			if runErr != nil {
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Migration failed: %v\n", runErr)})
+				return
+			}
+			p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "completed", Output: "Migration completed successfully!\n"})
 		}()
 
-		// Run migration
-		runErr := orch.Run(ctx)
-
-		// Restore stdout/stderr and logging
-		w.Close()
-		os.Stdout = origStdout
-		os.Stderr = origStderr
-		logging.SetOutput(origStdout)
-		<-done // Wait for reader to finish
-
-		if runErr != nil {
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Migration failed: %v\n", runErr)}
-		}
-		return MigrationDoneWithIDMsg{ID: migrationID, Status: "completed", Output: "Migration completed successfully!\n"}
+		// Return immediately to keep UI responsive
+		return nil
 	}
 }
 
@@ -1658,68 +1667,77 @@ func (m Model) runResumeCmdWithID(configFile, profileName, migrationID, label st
 
 		send(fmt.Sprintf("Resuming migration [%s] with %s\n", migrationID, label))
 
-		cfg, err := loadConfigFromOrigin(configFile, profileName)
-		if err != nil {
-			delete(migrationCancels, migrationID)
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error loading config: %v\n", err)}
-		}
-
-		orch, err := orchestrator.New(cfg)
-		if err != nil {
-			delete(migrationCancels, migrationID)
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
-		}
-		defer orch.Close()
-
-		if profileName != "" {
-			orch.SetRunContext(profileName, "")
-		} else {
-			orch.SetRunContext("", configFile)
-		}
-
-		// Create cancellable context
-		ctx, cancel := context.WithCancel(context.Background())
-		migrationCancels[migrationID] = cancel
-		defer delete(migrationCancels, migrationID)
-
-		// Redirect stdout/stderr and logging to this migration's output
-		r, w, _ := os.Pipe()
-		origStdout := os.Stdout
-		origStderr := os.Stderr
-		os.Stdout = w
-		os.Stderr = w
-		logging.SetOutput(w)
-
-		// Reader goroutine
-		done := make(chan struct{})
+		// Run resume asynchronously in a goroutine to avoid blocking the UI
 		go func() {
-			defer close(done)
-			buf := make([]byte, 1024)
-			for {
-				n, err := r.Read(buf)
-				if n > 0 {
-					p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
-				}
-				if err != nil {
-					break
-				}
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				delete(migrationCancels, migrationID)
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error loading config: %v\n", err)})
+				return
 			}
+
+			orch, err := orchestrator.New(cfg)
+			if err != nil {
+				delete(migrationCancels, migrationID)
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error initializing orchestrator: %v\n", err)})
+				return
+			}
+			defer orch.Close()
+
+			if profileName != "" {
+				orch.SetRunContext(profileName, "")
+			} else {
+				orch.SetRunContext("", configFile)
+			}
+
+			// Create cancellable context
+			ctx, cancel := context.WithCancel(context.Background())
+			migrationCancels[migrationID] = cancel
+			defer delete(migrationCancels, migrationID)
+
+			// Redirect stdout/stderr and logging to this migration's output
+			r, w, _ := os.Pipe()
+			origStdout := os.Stdout
+			origStderr := os.Stderr
+			os.Stdout = w
+			os.Stderr = w
+			logging.SetOutput(w)
+
+			// Reader goroutine
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				buf := make([]byte, 1024)
+				for {
+					n, err := r.Read(buf)
+					if n > 0 {
+						p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
+					}
+					if err != nil {
+						break
+					}
+				}
+			}()
+
+			// Run resume
+			runErr := orch.Resume(ctx)
+
+			// Restore stdout/stderr and logging
+			w.Close()
+			os.Stdout = origStdout
+			os.Stderr = origStderr
+			logging.SetOutput(origStdout)
+			<-done // Wait for reader to finish
+
+			if runErr != nil {
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Resume failed: %v\n", runErr)})
+				return
+			}
+			p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "completed", Output: "Resume completed successfully!\n"})
 		}()
 
-		// Run resume
-		runErr := orch.Resume(ctx)
-
-		// Restore stdout/stderr and logging
-		w.Close()
-		os.Stdout = origStdout
-		os.Stderr = origStderr
-		logging.SetOutput(origStdout)
-		<-done // Wait for reader to finish
-
-		if runErr != nil {
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Resume failed: %v\n", runErr)}
-		}
-		return MigrationDoneWithIDMsg{ID: migrationID, Status: "completed", Output: "Resume completed successfully!\n"}
+		// Return immediately to keep UI responsive
+		return nil
 	}
 }
 
