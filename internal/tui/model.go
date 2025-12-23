@@ -51,24 +51,24 @@ const (
 
 // Model is the main TUI model
 type Model struct {
-	viewport      viewport.Model
+	viewport       viewport.Model
 	wizardViewport viewport.Model // Secondary viewport for wizard during migration
-	textInput     textinput.Model
-	ready         bool
-	gitInfo       GitInfo
-	cwd           string
-	err           error
-	width         int
-	height        int
-	history       []string
-	historyIdx    int
-	logBuffer     string   // Persistent buffer for logs
-	wizardBuffer  string   // Buffer for wizard output (used during split view)
-	lineBuffer    string   // Buffer for incoming partial lines
-	progressLine  string   // Current progress bar line (updated in-place)
-	suggestions   []string // Auto-completion suggestions
-	suggestionIdx int      // Currently selected suggestion index
-	lastInput     string   // Last input value to prevent unnecessary suggestion regeneration
+	textInput      textinput.Model
+	ready          bool
+	gitInfo        GitInfo
+	cwd            string
+	err            error
+	width          int
+	height         int
+	history        []string
+	historyIdx     int
+	logBuffer      string   // Persistent buffer for logs
+	wizardBuffer   string   // Buffer for wizard output (used during split view)
+	lineBuffer     string   // Buffer for incoming partial lines
+	progressLine   string   // Current progress bar line (updated in-place)
+	suggestions    []string // Auto-completion suggestions
+	suggestionIdx  int      // Currently selected suggestion index
+	lastInput      string   // Last input value to prevent unnecessary suggestion regeneration
 
 	// Migration state
 	migrations       map[string]*MigrationInstance // Active migrations by ID
@@ -122,17 +122,17 @@ type BoxedOutputMsg string
 
 // MigrationInstance tracks a single running migration
 type MigrationInstance struct {
-	ID           string              // Unique ID for this migration
-	ConfigFile   string              // Config file path
-	ProfileName  string              // Profile name (if used)
-	Cancel       context.CancelFunc  // Cancel function for this migration
-	Buffer       string              // Output buffer for this migration
-	LineBuffer   string              // Buffer for incoming partial lines
-	ProgressLine string              // Current progress bar line
-	Status       string              // "running", "completed", "failed", "cancelled"
+	ID           string             // Unique ID for this migration
+	ConfigFile   string             // Config file path
+	ProfileName  string             // Profile name (if used)
+	Cancel       context.CancelFunc // Cancel function for this migration
+	Buffer       string             // Output buffer for this migration
+	LineBuffer   string             // Buffer for incoming partial lines
+	ProgressLine string             // Current progress bar line
+	Status       string             // "running", "completed", "failed", "cancelled"
 	StartedAt    time.Time
-	Viewport     viewport.Model      // Scrollable viewport for this migration
-	UserScrolled bool                // True if user manually scrolled (disables auto-scroll)
+	Viewport     viewport.Model // Scrollable viewport for this migration
+	UserScrolled bool           // True if user manually scrolled (disables auto-scroll)
 }
 
 // MigrationOutputMsg routes output to a specific migration
@@ -444,12 +444,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPgUp:
 			// Scroll focused viewport up (console or migration)
 			if m.focusedMigration == "console" || m.focusedMigration == "" {
-				m.viewport.LineUp(m.viewport.Height / 2)
+				m.viewport.ScrollUp(m.viewport.Height / 2)
 				return m, nil
 			}
 			if m.focusedMigration != "" {
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
-					mi.Viewport.LineUp(mi.Viewport.Height / 2)
+					mi.Viewport.ScrollUp(mi.Viewport.Height / 2)
 					mi.UserScrolled = true // Disable auto-scroll
 					return m, nil
 				}
@@ -457,12 +457,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPgDown:
 			// Scroll focused viewport down (console or migration)
 			if m.focusedMigration == "console" || m.focusedMigration == "" {
-				m.viewport.LineDown(m.viewport.Height / 2)
+				m.viewport.ScrollDown(m.viewport.Height / 2)
 				return m, nil
 			}
 			if m.focusedMigration != "" {
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
-					mi.Viewport.LineDown(mi.Viewport.Height / 2)
+					mi.Viewport.ScrollDown(mi.Viewport.Height / 2)
 					// Check if at bottom, re-enable auto-scroll
 					if mi.Viewport.AtBottom() {
 						mi.UserScrolled = false
@@ -500,11 +500,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// If migrations are showing and input is empty, scroll viewport
 			if len(m.migrationOrder) > 0 && m.textInput.Value() == "" && len(m.suggestions) == 0 {
 				if m.focusedMigration == "console" || m.focusedMigration == "" {
-					m.viewport.LineUp(1)
+					m.viewport.ScrollUp(1)
 					return m, nil
 				}
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
-					mi.Viewport.LineUp(1)
+					mi.Viewport.ScrollUp(1)
 					mi.UserScrolled = true
 					return m, nil
 				}
@@ -519,11 +519,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// If migrations are showing and input is empty, scroll viewport
 			if len(m.migrationOrder) > 0 && m.textInput.Value() == "" && len(m.suggestions) == 0 {
 				if m.focusedMigration == "console" || m.focusedMigration == "" {
-					m.viewport.LineDown(1)
+					m.viewport.ScrollDown(1)
 					return m, nil
 				}
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
-					mi.Viewport.LineDown(1)
+					mi.Viewport.ScrollDown(1)
 					if mi.Viewport.AtBottom() {
 						mi.UserScrolled = false
 					}
@@ -1074,7 +1074,7 @@ func (m Model) renderSplitView(suggestionsView string) string {
 
 	// Style for the split panes (both with consistent padding)
 	migrationStyle := lipgloss.NewStyle().
-		Width(m.width - 2).
+		Width(m.width-2).
 		Height(migrationHeight).
 		PaddingLeft(1).
 		Border(lipgloss.RoundedBorder(), false, false, true, false). // Bottom border only
