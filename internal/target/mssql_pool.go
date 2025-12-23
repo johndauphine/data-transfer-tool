@@ -414,8 +414,8 @@ func (p *MSSQLPool) PrepareUpsertStaging(ctx context.Context, schema, table stri
 	return err
 }
 
-// ExecuteUpsertMerge runs chunked MERGE operations after all data is staged
-// This scales better than a single MERGE on large tables
+// ExecuteUpsertMerge runs chunked UPDATE + INSERT operations after all data is staged
+// Uses separate UPDATE and INSERT statements instead of MERGE for better performance
 func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string) error {
 	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
 
@@ -431,13 +431,12 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 	}
 
 	if rowCount == 0 {
-		// Nothing to merge, just cleanup
+		// Nothing to upsert, just cleanup
 		p.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", stagingTable))
 		return nil
 	}
 
-	// Create index on staging table PK for efficient chunked MERGE
-	// This dramatically speeds up the BETWEEN queries
+	// Create index on staging table PK for efficient chunked operations
 	indexName := fmt.Sprintf("IX_staging_%s_pk", table)
 	var pkColList []string
 	for _, pk := range pkCols {
@@ -447,18 +446,22 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 		quoteMSSQLIdent(indexName), stagingTable, strings.Join(pkColList, ", "))
 	if _, err := p.db.ExecContext(ctx, indexSQL); err != nil {
 		// Non-fatal - continue without index (just slower)
-		// Log would be nice here but we don't have logger access
 	}
 
-	// For small tables or non-integer PKs, use single MERGE
+	// Build UPDATE and INSERT SQL templates
+	updateSQL, insertSQL := buildMSSQLUpsertSQL(schema, table, stagingTable, cols, pkCols)
+
+	// For small tables, execute single UPDATE + INSERT
 	if rowCount <= 100000 || maxPK == 0 {
-		mergeSQL := buildMSSQLMergeSQL(schema, table, stagingTable, cols, pkCols, false)
-		if _, err := p.db.ExecContext(ctx, mergeSQL); err != nil {
-			return fmt.Errorf("executing merge: %w", err)
+		if _, err := p.db.ExecContext(ctx, updateSQL); err != nil {
+			return fmt.Errorf("executing update: %w", err)
+		}
+		if _, err := p.db.ExecContext(ctx, insertSQL); err != nil {
+			return fmt.Errorf("executing insert: %w", err)
 		}
 	} else {
-		// Chunked MERGE for large tables
-		chunkSize := int64(50000) // 50k rows per MERGE
+		// Chunked UPDATE + INSERT for large tables
+		chunkSize := int64(50000)
 
 		for start := minPK; start <= maxPK; start += chunkSize {
 			end := start + chunkSize - 1
@@ -466,9 +469,12 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 				end = maxPK
 			}
 
-			mergeSQL := buildMSSQLChunkedMergeSQL(schema, table, stagingTable, cols, pkCols, pkCol, start, end)
-			if _, err := p.db.ExecContext(ctx, mergeSQL); err != nil {
-				return fmt.Errorf("executing chunked merge (pk %d-%d): %w", start, end, err)
+			chunkedUpdate, chunkedInsert := buildMSSQLChunkedUpsertSQL(schema, table, stagingTable, cols, pkCols, pkCol, start, end)
+			if _, err := p.db.ExecContext(ctx, chunkedUpdate); err != nil {
+				return fmt.Errorf("executing chunked update (pk %d-%d): %w", start, end, err)
+			}
+			if _, err := p.db.ExecContext(ctx, chunkedInsert); err != nil {
+				return fmt.Errorf("executing chunked insert (pk %d-%d): %w", start, end, err)
 			}
 		}
 	}
@@ -480,15 +486,17 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 	return nil
 }
 
-// buildMSSQLChunkedMergeSQL generates a MERGE statement for a PK range
-func buildMSSQLChunkedMergeSQL(schema, table, stagingTable string, cols []string, pkCols []string, pkCol string, startPK, endPK int64) string {
-	var sb strings.Builder
+// buildMSSQLUpsertSQL generates separate UPDATE and INSERT statements
+// Returns (updateSQL, insertSQL)
+func buildMSSQLUpsertSQL(schema, table, stagingTable string, cols []string, pkCols []string) (string, string) {
+	targetTable := qualifyMSSQLTable(schema, table)
 
-	// Build ON clause for PK matching
-	onClauses := make([]string, len(pkCols))
+	// Build PK join condition
+	pkJoins := make([]string, len(pkCols))
 	for i, pk := range pkCols {
-		onClauses[i] = fmt.Sprintf("target.%s = src.%s", quoteMSSQLIdent(pk), quoteMSSQLIdent(pk))
+		pkJoins[i] = fmt.Sprintf("t.%s = s.%s", quoteMSSQLIdent(pk), quoteMSSQLIdent(pk))
 	}
+	pkJoinClause := strings.Join(pkJoins, " AND ")
 
 	// Build SET clause (exclude PK columns)
 	pkSet := make(map[string]bool)
@@ -498,53 +506,58 @@ func buildMSSQLChunkedMergeSQL(schema, table, stagingTable string, cols []string
 	var setClauses []string
 	for _, col := range cols {
 		if !pkSet[col] {
-			setClauses = append(setClauses, fmt.Sprintf("target.%s = src.%s", quoteMSSQLIdent(col), quoteMSSQLIdent(col)))
+			setClauses = append(setClauses, fmt.Sprintf("t.%s = s.%s", quoteMSSQLIdent(col), quoteMSSQLIdent(col)))
 		}
 	}
 
-	// Build INSERT columns and values
+	// Build column lists for INSERT
 	quotedCols := make([]string, len(cols))
 	srcCols := make([]string, len(cols))
 	for i, col := range cols {
 		quotedCols[i] = quoteMSSQLIdent(col)
-		srcCols[i] = fmt.Sprintf("src.%s", quoteMSSQLIdent(col))
+		srcCols[i] = fmt.Sprintf("s.%s", quoteMSSQLIdent(col))
 	}
 
-	// MERGE with subquery that filters by PK range
-	sb.WriteString(fmt.Sprintf("MERGE INTO %s AS target\n", qualifyMSSQLTable(schema, table)))
-	sb.WriteString(fmt.Sprintf("USING (SELECT * FROM %s WHERE %s BETWEEN %d AND %d) AS src\n",
-		stagingTable, quoteMSSQLIdent(pkCol), startPK, endPK))
-	sb.WriteString(fmt.Sprintf("ON (%s)\n", strings.Join(onClauses, " AND ")))
-
+	// UPDATE: Join staging to target on PK, update non-PK columns
+	var updateSQL string
 	if len(setClauses) > 0 {
-		sb.WriteString("WHEN MATCHED THEN\n")
-		sb.WriteString(fmt.Sprintf("  UPDATE SET %s\n", strings.Join(setClauses, ", ")))
+		updateSQL = fmt.Sprintf(`UPDATE t SET %s
+FROM %s t
+INNER JOIN %s s ON %s`,
+			strings.Join(setClauses, ", "),
+			targetTable,
+			stagingTable,
+			pkJoinClause)
 	}
 
-	sb.WriteString("WHEN NOT MATCHED BY TARGET THEN\n")
-	sb.WriteString(fmt.Sprintf("  INSERT (%s) VALUES (%s);",
+	// INSERT: Insert rows from staging that don't exist in target
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s)
+SELECT %s
+FROM %s s
+WHERE NOT EXISTS (
+    SELECT 1 FROM %s t WHERE %s
+)`,
+		targetTable,
 		strings.Join(quotedCols, ", "),
-		strings.Join(srcCols, ", ")))
+		strings.Join(srcCols, ", "),
+		stagingTable,
+		targetTable,
+		pkJoinClause)
 
-	return sb.String()
+	return updateSQL, insertSQL
 }
 
-// buildMSSQLMergeSQL generates SQL Server MERGE statement
-// MERGE INTO target AS t
-// USING staging AS s ON t.pk = s.pk
-// WHEN MATCHED AND EXISTS(SELECT s.* EXCEPT SELECT t.*) THEN UPDATE SET ...
-// WHEN NOT MATCHED THEN INSERT (cols) VALUES (s.cols);
-//
-// useExcept: If true, use EXCEPT for change detection (requires compat level >= 130).
-// If false, always update matched rows (less efficient but compatible with older SQL Server).
-func buildMSSQLMergeSQL(schema, table, stagingTable string, cols []string, pkCols []string, useExcept bool) string {
-	var sb strings.Builder
+// buildMSSQLChunkedUpsertSQL generates UPDATE and INSERT statements for a PK range
+// Returns (updateSQL, insertSQL)
+func buildMSSQLChunkedUpsertSQL(schema, table, stagingTable string, cols []string, pkCols []string, pkCol string, startPK, endPK int64) (string, string) {
+	targetTable := qualifyMSSQLTable(schema, table)
 
-	// Build ON clause for PK matching
-	onClauses := make([]string, len(pkCols))
+	// Build PK join condition
+	pkJoins := make([]string, len(pkCols))
 	for i, pk := range pkCols {
-		onClauses[i] = fmt.Sprintf("target.%s = src.%s", quoteMSSQLIdent(pk), quoteMSSQLIdent(pk))
+		pkJoins[i] = fmt.Sprintf("t.%s = s.%s", quoteMSSQLIdent(pk), quoteMSSQLIdent(pk))
 	}
+	pkJoinClause := strings.Join(pkJoins, " AND ")
 
 	// Build SET clause (exclude PK columns)
 	pkSet := make(map[string]bool)
@@ -554,51 +567,52 @@ func buildMSSQLMergeSQL(schema, table, stagingTable string, cols []string, pkCol
 	var setClauses []string
 	for _, col := range cols {
 		if !pkSet[col] {
-			setClauses = append(setClauses, fmt.Sprintf("target.%s = src.%s", quoteMSSQLIdent(col), quoteMSSQLIdent(col)))
+			setClauses = append(setClauses, fmt.Sprintf("t.%s = s.%s", quoteMSSQLIdent(col), quoteMSSQLIdent(col)))
 		}
 	}
 
-	// Build INSERT columns and values
+	// Build column lists for INSERT
 	quotedCols := make([]string, len(cols))
 	srcCols := make([]string, len(cols))
 	for i, col := range cols {
 		quotedCols[i] = quoteMSSQLIdent(col)
-		srcCols[i] = fmt.Sprintf("src.%s", quoteMSSQLIdent(col))
+		srcCols[i] = fmt.Sprintf("s.%s", quoteMSSQLIdent(col))
 	}
 
-	sb.WriteString(fmt.Sprintf("MERGE INTO %s AS target\n", qualifyMSSQLTable(schema, table)))
-	sb.WriteString(fmt.Sprintf("USING %s AS src\n", stagingTable))
-	sb.WriteString(fmt.Sprintf("ON (%s)\n", strings.Join(onClauses, " AND ")))
+	// PK range filter
+	pkRangeFilter := fmt.Sprintf("s.%s BETWEEN %d AND %d", quoteMSSQLIdent(pkCol), startPK, endPK)
 
+	// UPDATE: Join staging to target on PK within range
+	var updateSQL string
 	if len(setClauses) > 0 {
-		if useExcept {
-			// WHEN MATCHED AND (change detection using EXCEPT) - SQL Server 2016+
-			srcColsForCompare := make([]string, 0, len(cols))
-			targetColsForCompare := make([]string, 0, len(cols))
-			for _, col := range cols {
-				if !pkSet[col] {
-					srcColsForCompare = append(srcColsForCompare, fmt.Sprintf("src.%s", quoteMSSQLIdent(col)))
-					targetColsForCompare = append(targetColsForCompare, fmt.Sprintf("target.%s", quoteMSSQLIdent(col)))
-				}
-			}
-			sb.WriteString("WHEN MATCHED AND EXISTS(\n")
-			sb.WriteString(fmt.Sprintf("  SELECT %s\n  EXCEPT\n  SELECT %s\n) THEN\n",
-				strings.Join(srcColsForCompare, ", "),
-				strings.Join(targetColsForCompare, ", ")))
-			sb.WriteString(fmt.Sprintf("  UPDATE SET %s\n", strings.Join(setClauses, ", ")))
-		} else {
-			// WHEN MATCHED - always update (less efficient, but compatible with older SQL Server)
-			sb.WriteString("WHEN MATCHED THEN\n")
-			sb.WriteString(fmt.Sprintf("  UPDATE SET %s\n", strings.Join(setClauses, ", ")))
-		}
+		updateSQL = fmt.Sprintf(`UPDATE t SET %s
+FROM %s t
+INNER JOIN %s s ON %s
+WHERE %s`,
+			strings.Join(setClauses, ", "),
+			targetTable,
+			stagingTable,
+			pkJoinClause,
+			pkRangeFilter)
 	}
 
-	sb.WriteString("WHEN NOT MATCHED BY TARGET THEN\n")
-	sb.WriteString(fmt.Sprintf("  INSERT (%s) VALUES (%s);",
+	// INSERT: Insert rows from staging (within range) that don't exist in target
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s)
+SELECT %s
+FROM %s s
+WHERE %s
+AND NOT EXISTS (
+    SELECT 1 FROM %s t WHERE %s
+)`,
+		targetTable,
 		strings.Join(quotedCols, ", "),
-		strings.Join(srcCols, ", ")))
+		strings.Join(srcCols, ", "),
+		stagingTable,
+		pkRangeFilter,
+		targetTable,
+		pkJoinClause)
 
-	return sb.String()
+	return updateSQL, insertSQL
 }
 
 // GenerateMSSQLDDL generates SQL Server DDL from source table metadata
