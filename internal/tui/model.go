@@ -444,12 +444,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPgUp:
 			// Scroll focused viewport up (console or migration)
 			if m.focusedMigration == "console" || m.focusedMigration == "" {
-				m.viewport.LineUp(m.viewport.Height / 2)
+				m.viewport.ScrollUp(m.viewport.Height / 2)
 				return m, nil
 			}
 			if m.focusedMigration != "" {
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
-					mi.Viewport.LineUp(mi.Viewport.Height / 2)
+					mi.Viewport.ScrollUp(mi.Viewport.Height / 2)
 					mi.UserScrolled = true // Disable auto-scroll
 					return m, nil
 				}
@@ -457,12 +457,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPgDown:
 			// Scroll focused viewport down (console or migration)
 			if m.focusedMigration == "console" || m.focusedMigration == "" {
-				m.viewport.LineDown(m.viewport.Height / 2)
+				m.viewport.ScrollDown(m.viewport.Height / 2)
 				return m, nil
 			}
 			if m.focusedMigration != "" {
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
-					mi.Viewport.LineDown(mi.Viewport.Height / 2)
+					mi.Viewport.ScrollDown(mi.Viewport.Height / 2)
 					// Check if at bottom, re-enable auto-scroll
 					if mi.Viewport.AtBottom() {
 						mi.UserScrolled = false
@@ -500,11 +500,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// If migrations are showing and input is empty, scroll viewport
 			if len(m.migrationOrder) > 0 && m.textInput.Value() == "" && len(m.suggestions) == 0 {
 				if m.focusedMigration == "console" || m.focusedMigration == "" {
-					m.viewport.LineUp(1)
+					m.viewport.ScrollUp(1)
 					return m, nil
 				}
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
-					mi.Viewport.LineUp(1)
+					mi.Viewport.ScrollUp(1)
 					mi.UserScrolled = true
 					return m, nil
 				}
@@ -519,11 +519,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// If migrations are showing and input is empty, scroll viewport
 			if len(m.migrationOrder) > 0 && m.textInput.Value() == "" && len(m.suggestions) == 0 {
 				if m.focusedMigration == "console" || m.focusedMigration == "" {
-					m.viewport.LineDown(1)
+					m.viewport.ScrollDown(1)
 					return m, nil
 				}
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
-					mi.Viewport.LineDown(1)
+					mi.Viewport.ScrollDown(1)
 					if mi.Viewport.AtBottom() {
 						mi.UserScrolled = false
 					}
