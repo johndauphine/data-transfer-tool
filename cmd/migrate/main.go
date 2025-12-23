@@ -163,10 +163,9 @@ func main() {
 						Action: saveProfile,
 						Flags: []cli.Flag{
 							&cli.StringFlag{
-								Name:     "name",
-								Aliases:  []string{"n"},
-								Required: true,
-								Usage:    "Profile name",
+								Name:    "name",
+								Aliases: []string{"n"},
+								Usage:   "Profile name (inferred from profile.name or filename if omitted)",
 							},
 							&cli.StringFlag{
 								Name:    "config",
