@@ -57,9 +57,15 @@ type TargetPool interface {
 	GetRowCount(ctx context.Context, schema, table string) (int64, error)
 	ResetSequence(ctx context.Context, schema string, t *source.Table) error
 
-	// UpsertChunk performs INSERT ON CONFLICT (PG) or MERGE (MSSQL) for upsert mode
+	// UpsertChunk performs INSERT ON CONFLICT (PG) or stages data for MERGE (MSSQL)
 	// pkCols identifies the primary key columns for conflict detection
 	UpsertChunk(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any) error
+
+	// PrepareUpsertStaging prepares staging table before transfer (MSSQL only, no-op for PG)
+	PrepareUpsertStaging(ctx context.Context, schema, table string) error
+
+	// ExecuteUpsertMerge runs final MERGE after all chunks staged (MSSQL only, no-op for PG)
+	ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string) error
 
 	// Pool info
 	MaxConns() int

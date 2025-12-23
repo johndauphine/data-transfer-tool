@@ -183,6 +183,16 @@ func (p *Pool) HasPrimaryKey(ctx context.Context, schema, table string) (bool, e
 	return exists, err
 }
 
+// PrepareUpsertStaging is a no-op for PostgreSQL (batched upsert doesn't need staging)
+func (p *Pool) PrepareUpsertStaging(ctx context.Context, schema, table string) error {
+	return nil
+}
+
+// ExecuteUpsertMerge is a no-op for PostgreSQL (upsert happens in UpsertChunk)
+func (p *Pool) ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string) error {
+	return nil
+}
+
 // ResetSequence resets identity sequence to max value
 func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table) error {
 	// Find identity column

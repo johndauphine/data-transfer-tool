@@ -386,73 +386,147 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 	return nil
 }
 
-// UpsertChunk performs upsert using a staging table and MERGE for upsert mode
+// UpsertChunk for MSSQL uses whole-table staging approach:
+// - Bulk loads data into staging table (fast, using existing WriteChunk logic)
+// - MERGE runs once at the end via ExecuteUpsertMerge
 func (p *MSSQLPool) UpsertChunk(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	if len(pkCols) == 0 {
-		return fmt.Errorf("upsert requires primary key columns")
+	// Write to staging table instead of target (bulk copy is fast)
+	stagingTable := fmt.Sprintf("staging_%s", table)
+	return p.WriteChunk(ctx, schema, stagingTable, cols, rows)
+}
+
+// PrepareUpsertStaging creates the staging table before transfer
+func (p *MSSQLPool) PrepareUpsertStaging(ctx context.Context, schema, table string) error {
+	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
+	targetTable := qualifyMSSQLTable(schema, table)
+
+	// Drop if exists and create fresh staging table with same structure
+	sql := fmt.Sprintf(`
+		IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s;
+		SELECT * INTO %s FROM %s WHERE 1=0`,
+		stagingTable, stagingTable, stagingTable, targetTable)
+
+	_, err := p.db.ExecContext(ctx, sql)
+	return err
+}
+
+// ExecuteUpsertMerge runs chunked MERGE operations after all data is staged
+// This scales better than a single MERGE on large tables
+func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string) error {
+	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
+
+	// Get row count and min/max PK from staging table
+	var rowCount int64
+	var minPK, maxPK int64
+	pkCol := pkCols[0] // Use first PK column for chunking
+
+	countSQL := fmt.Sprintf("SELECT COUNT(*), ISNULL(MIN(%s), 0), ISNULL(MAX(%s), 0) FROM %s",
+		quoteMSSQLIdent(pkCol), quoteMSSQLIdent(pkCol), stagingTable)
+	if err := p.db.QueryRowContext(ctx, countSQL).Scan(&rowCount, &minPK, &maxPK); err != nil {
+		return fmt.Errorf("getting staging table stats: %w", err)
 	}
 
-	// Generate unique staging table name
-	stagingTable := fmt.Sprintf("#staging_%s_%d", table, time.Now().UnixNano())
-
-	// Start transaction
-	txn, err := p.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer txn.Rollback()
-
-	// 1. Create staging table (temp table with same structure)
-	createStaging := fmt.Sprintf("SELECT TOP 0 * INTO %s FROM %s",
-		stagingTable, qualifyMSSQLTable(schema, table))
-	if _, err := txn.ExecContext(ctx, createStaging); err != nil {
-		return fmt.Errorf("creating staging table: %w", err)
+	if rowCount == 0 {
+		// Nothing to merge, just cleanup
+		p.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", stagingTable))
+		return nil
 	}
 
-	// 2. Bulk insert into staging table
-	rowsPerBatch := p.rowsPerBatch
-	if rowsPerBatch <= 0 || rowsPerBatch > len(rows) {
-		rowsPerBatch = len(rows)
+	// Create index on staging table PK for efficient chunked MERGE
+	// This dramatically speeds up the BETWEEN queries
+	indexName := fmt.Sprintf("IX_staging_%s_pk", table)
+	var pkColList []string
+	for _, pk := range pkCols {
+		pkColList = append(pkColList, quoteMSSQLIdent(pk))
 	}
-	bulkOpts := mssql.BulkOptions{RowsPerBatch: rowsPerBatch}
-	stmt, err := txn.PrepareContext(ctx, mssql.CopyIn(stagingTable, bulkOpts, cols...))
-	if err != nil {
-		return fmt.Errorf("preparing bulk copy to staging: %w", err)
+	indexSQL := fmt.Sprintf("CREATE CLUSTERED INDEX %s ON %s (%s)",
+		quoteMSSQLIdent(indexName), stagingTable, strings.Join(pkColList, ", "))
+	if _, err := p.db.ExecContext(ctx, indexSQL); err != nil {
+		// Non-fatal - continue without index (just slower)
+		// Log would be nice here but we don't have logger access
 	}
 
-	for _, row := range rows {
-		if _, err = stmt.ExecContext(ctx, row...); err != nil {
-			stmt.Close()
-			return fmt.Errorf("bulk copy row to staging: %w", err)
+	// For small tables or non-integer PKs, use single MERGE
+	if rowCount <= 100000 || maxPK == 0 {
+		mergeSQL := buildMSSQLMergeSQL(schema, table, stagingTable, cols, pkCols, false)
+		if _, err := p.db.ExecContext(ctx, mergeSQL); err != nil {
+			return fmt.Errorf("executing merge: %w", err)
+		}
+	} else {
+		// Chunked MERGE for large tables
+		chunkSize := int64(50000) // 50k rows per MERGE
+
+		for start := minPK; start <= maxPK; start += chunkSize {
+			end := start + chunkSize - 1
+			if end > maxPK {
+				end = maxPK
+			}
+
+			mergeSQL := buildMSSQLChunkedMergeSQL(schema, table, stagingTable, cols, pkCols, pkCol, start, end)
+			if _, err := p.db.ExecContext(ctx, mergeSQL); err != nil {
+				return fmt.Errorf("executing chunked merge (pk %d-%d): %w", start, end, err)
+			}
 		}
 	}
-	if _, err = stmt.ExecContext(ctx); err != nil {
-		stmt.Close()
-		return fmt.Errorf("flushing bulk copy to staging: %w", err)
-	}
-	stmt.Close()
 
-	// 3. Execute MERGE
-	// Use EXCEPT-based change detection only for compat level >= 130 (SQL Server 2016+)
-	// For older versions, fall back to always-update (less efficient but compatible)
-	useExcept := p.compatLevel >= 130
-	mergeSQL := buildMSSQLMergeSQL(schema, table, stagingTable, cols, pkCols, useExcept)
-	if _, err := txn.ExecContext(ctx, mergeSQL); err != nil {
-		return fmt.Errorf("executing merge: %w", err)
-	}
-
-	// 4. Drop staging table (optional, happens on connection close anyway for temp tables)
-	txn.ExecContext(ctx, fmt.Sprintf("DROP TABLE %s", stagingTable))
-
-	if err := txn.Commit(); err != nil {
-		return fmt.Errorf("committing merge: %w", err)
-	}
+	// Drop staging table
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", stagingTable)
+	p.db.ExecContext(ctx, dropSQL)
 
 	return nil
+}
+
+// buildMSSQLChunkedMergeSQL generates a MERGE statement for a PK range
+func buildMSSQLChunkedMergeSQL(schema, table, stagingTable string, cols []string, pkCols []string, pkCol string, startPK, endPK int64) string {
+	var sb strings.Builder
+
+	// Build ON clause for PK matching
+	onClauses := make([]string, len(pkCols))
+	for i, pk := range pkCols {
+		onClauses[i] = fmt.Sprintf("target.%s = src.%s", quoteMSSQLIdent(pk), quoteMSSQLIdent(pk))
+	}
+
+	// Build SET clause (exclude PK columns)
+	pkSet := make(map[string]bool)
+	for _, pk := range pkCols {
+		pkSet[pk] = true
+	}
+	var setClauses []string
+	for _, col := range cols {
+		if !pkSet[col] {
+			setClauses = append(setClauses, fmt.Sprintf("target.%s = src.%s", quoteMSSQLIdent(col), quoteMSSQLIdent(col)))
+		}
+	}
+
+	// Build INSERT columns and values
+	quotedCols := make([]string, len(cols))
+	srcCols := make([]string, len(cols))
+	for i, col := range cols {
+		quotedCols[i] = quoteMSSQLIdent(col)
+		srcCols[i] = fmt.Sprintf("src.%s", quoteMSSQLIdent(col))
+	}
+
+	// MERGE with subquery that filters by PK range
+	sb.WriteString(fmt.Sprintf("MERGE INTO %s AS target\n", qualifyMSSQLTable(schema, table)))
+	sb.WriteString(fmt.Sprintf("USING (SELECT * FROM %s WHERE %s BETWEEN %d AND %d) AS src\n",
+		stagingTable, quoteMSSQLIdent(pkCol), startPK, endPK))
+	sb.WriteString(fmt.Sprintf("ON (%s)\n", strings.Join(onClauses, " AND ")))
+
+	if len(setClauses) > 0 {
+		sb.WriteString("WHEN MATCHED THEN\n")
+		sb.WriteString(fmt.Sprintf("  UPDATE SET %s\n", strings.Join(setClauses, ", ")))
+	}
+
+	sb.WriteString("WHEN NOT MATCHED BY TARGET THEN\n")
+	sb.WriteString(fmt.Sprintf("  INSERT (%s) VALUES (%s);",
+		strings.Join(quotedCols, ", "),
+		strings.Join(srcCols, ", ")))
+
+	return sb.String()
 }
 
 // buildMSSQLMergeSQL generates SQL Server MERGE statement

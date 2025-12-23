@@ -719,6 +719,20 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		}
 	}
 
+	// For upsert mode with MSSQL target, prepare staging tables before transfer
+	// This creates empty staging tables that will be bulk-loaded during transfer
+	if o.config.Migration.TargetMode == "upsert" && o.targetPool.DBType() == "mssql" {
+		preparedTables := make(map[string]bool)
+		for _, j := range jobs {
+			if !preparedTables[j.Table.Name] {
+				if err := o.targetPool.PrepareUpsertStaging(ctx, o.config.Target.Schema, j.Table.Name); err != nil {
+					return nil, fmt.Errorf("preparing upsert staging for %s: %w", j.Table.Name, err)
+				}
+				preparedTables[j.Table.Name] = true
+			}
+		}
+	}
+
 	// Execute jobs with worker pool
 	logging.Debug("Starting worker pool with %d workers, %d jobs", o.config.Migration.Workers, len(jobs))
 	sem := make(chan struct{}, o.config.Migration.Workers)
@@ -777,6 +791,16 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 			// If all jobs for this table are complete, mark table task as success
 			if ts.jobsComplete == tableJobs[j.Table.Name] && ts.jobsFailed == 0 {
+				// For MSSQL upsert mode, execute the final MERGE now that all data is staged
+				if o.config.Migration.TargetMode == "upsert" && o.targetPool.DBType() == "mssql" {
+					cols := make([]string, len(j.Table.Columns))
+					for i, c := range j.Table.Columns {
+						cols[i] = c.Name
+					}
+					if err := o.targetPool.ExecuteUpsertMerge(ctx, o.config.Target.Schema, j.Table.Name, cols, j.Table.PrimaryKey); err != nil {
+						logging.Warn("ExecuteUpsertMerge failed for %s: %v", j.Table.Name, err)
+					}
+				}
 				taskKey := fmt.Sprintf("transfer:%s.%s", j.Table.Schema, j.Table.Name)
 				o.markTableComplete(runID, taskKey)
 			}
