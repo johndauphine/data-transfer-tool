@@ -438,7 +438,8 @@ func (p *MSSQLPool) PrepareUpsertStaging(ctx context.Context, schema, table stri
 
 // ExecuteUpsertMerge runs chunked UPDATE + INSERT operations after all data is staged
 // Uses separate UPDATE and INSERT statements instead of MERGE for better performance
-func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string) error {
+// mergeChunkSize controls the chunk size for UPDATE+INSERT operations (0 = use default 5000)
+func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string, mergeChunkSize int) error {
 	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
 
 	// Get row count and min/max PK from staging table
@@ -485,9 +486,17 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 		}
 	} else {
 		// Chunked UPDATE + INSERT for large tables
-		// Use 5K chunks - balance between performance and memory pressure
-		chunkSize := int64(5000)
+		// Use configured chunk size (default 5K if not specified)
+		chunkSize := int64(mergeChunkSize)
+		if chunkSize <= 0 {
+			chunkSize = 5000
+		}
 		chunksProcessed := 0
+		// CHECKPOINT every ~50K rows to release memory buffers
+		checkpointInterval := int(50000 / chunkSize)
+		if checkpointInterval < 1 {
+			checkpointInterval = 1
+		}
 
 		for start := minPK; start <= maxPK; start += chunkSize {
 			end := start + chunkSize - 1
@@ -506,8 +515,7 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 			}
 
 			chunksProcessed++
-			// Issue CHECKPOINT every 10 chunks (50K rows) to release memory buffers
-			if chunksProcessed%10 == 0 {
+			if chunksProcessed%checkpointInterval == 0 {
 				p.db.ExecContext(ctx, "CHECKPOINT")
 			}
 		}

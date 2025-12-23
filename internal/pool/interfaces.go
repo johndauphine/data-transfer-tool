@@ -65,7 +65,8 @@ type TargetPool interface {
 	PrepareUpsertStaging(ctx context.Context, schema, table string) error
 
 	// ExecuteUpsertMerge runs final MERGE after all chunks staged (MSSQL only, no-op for PG)
-	ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string) error
+	// mergeChunkSize controls the chunk size for UPDATE+INSERT operations (0 = use default)
+	ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string, mergeChunkSize int) error
 
 	// CheckUpsertStagingReady checks if staging table exists and has data (for resume)
 	// Returns (exists, rowCount, error) - used to skip bulk insert on resume if staging is ready

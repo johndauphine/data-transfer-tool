@@ -35,17 +35,18 @@ type AutoConfig struct {
 	CPUCores             int
 
 	// Original values (before auto-tuning)
-	OriginalWorkers           int
-	OriginalChunkSize         int
-	OriginalReadAheadBuffers  int
-	OriginalMaxPartitions     int
-	OriginalMaxMssqlConns     int
-	OriginalMaxPgConns        int
-	OriginalWriteAheadWriters int
-	OriginalParallelReaders   int
-	OriginalMSSQLRowsPerBatch int
-	OriginalLargeTableThresh  int64
-	OriginalSampleSize        int
+	OriginalWorkers              int
+	OriginalChunkSize            int
+	OriginalReadAheadBuffers     int
+	OriginalMaxPartitions        int
+	OriginalMaxMssqlConns        int
+	OriginalMaxPgConns           int
+	OriginalWriteAheadWriters    int
+	OriginalParallelReaders      int
+	OriginalMSSQLRowsPerBatch    int
+	OriginalLargeTableThresh     int64
+	OriginalSampleSize           int
+	OriginalUpsertMergeChunkSize int
 
 	// Target memory used for calculations
 	TargetMemoryMB int64
@@ -142,6 +143,7 @@ type MigrationConfig struct {
 	WriteAheadWriters      int      `yaml:"write_ahead_writers"`      // Number of parallel writers per job (default=2)
 	ParallelReaders        int      `yaml:"parallel_readers"`         // Number of parallel readers per job (default=2)
 	MSSQLRowsPerBatch      int      `yaml:"mssql_rows_per_batch"`     // MSSQL bulk copy hint (default=chunk_size)
+	UpsertMergeChunkSize   int      `yaml:"upsert_merge_chunk_size"`  // Chunk size for upsert UPDATE+INSERT (default=5000, auto-tuned)
 	MaxMemoryMB            int64    `yaml:"max_memory_mb"`            // Max memory to use (default=70% of available, hard cap at 70%)
 }
 
@@ -220,6 +222,7 @@ func (c *Config) applyDefaults() {
 	c.autoConfig.OriginalMSSQLRowsPerBatch = c.Migration.MSSQLRowsPerBatch
 	c.autoConfig.OriginalLargeTableThresh = c.Migration.LargeTableThreshold
 	c.autoConfig.OriginalSampleSize = c.Migration.SampleSize
+	c.autoConfig.OriginalUpsertMergeChunkSize = c.Migration.UpsertMergeChunkSize
 
 	// Detect system resources
 	c.autoConfig.CPUCores = runtime.NumCPU()
@@ -421,6 +424,30 @@ func (c *Config) applyDefaults() {
 	// Default MSSQLRowsPerBatch to chunk_size if not specified
 	if c.Migration.MSSQLRowsPerBatch == 0 {
 		c.Migration.MSSQLRowsPerBatch = c.Migration.ChunkSize
+	}
+
+	// Auto-tune UpsertMergeChunkSize for upsert mode
+	// This controls UPDATE+INSERT chunk size for MSSQL target
+	// Smaller chunks reduce SQL Server memory pressure during merge operations
+	if c.Migration.UpsertMergeChunkSize == 0 {
+		if c.Migration.TargetMode == "upsert" {
+			// For upsert mode, use smaller chunks based on available memory
+			// Base: 5000 rows, scale up with memory (max 20000)
+			memoryFactor := targetMemoryMB / 1024 // Scale factor per GB
+			if memoryFactor < 1 {
+				memoryFactor = 1
+			}
+			c.Migration.UpsertMergeChunkSize = int(5000 * memoryFactor)
+			if c.Migration.UpsertMergeChunkSize > 20000 {
+				c.Migration.UpsertMergeChunkSize = 20000
+			}
+			if c.Migration.UpsertMergeChunkSize < 2000 {
+				c.Migration.UpsertMergeChunkSize = 2000
+			}
+		} else {
+			// Not in upsert mode - set a sensible default anyway
+			c.Migration.UpsertMergeChunkSize = 10000
+		}
 	}
 }
 
@@ -920,6 +947,12 @@ func (c *Config) DebugDump() string {
 
 	// Other settings
 	b.WriteString(fmt.Sprintf("  TargetMode: %s\n", c.Migration.TargetMode))
+
+	// UpsertMergeChunkSize - only show in upsert mode
+	if c.Migration.TargetMode == "upsert" {
+		upsertExpl := "auto: memory-scaled 5K-20K"
+		b.WriteString(fmt.Sprintf("  UpsertMergeChunkSize: %s\n", formatAutoValue(c.Migration.UpsertMergeChunkSize, ac.OriginalUpsertMergeChunkSize, upsertExpl)))
+	}
 	b.WriteString(fmt.Sprintf("  StrictConsistency: %v\n", c.Migration.StrictConsistency))
 	b.WriteString(fmt.Sprintf("  CreateIndexes: %v\n", c.Migration.CreateIndexes))
 	b.WriteString(fmt.Sprintf("  CreateForeignKeys: %v\n", c.Migration.CreateForeignKeys))

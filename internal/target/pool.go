@@ -189,7 +189,7 @@ func (p *Pool) PrepareUpsertStaging(ctx context.Context, schema, table string) e
 }
 
 // ExecuteUpsertMerge is a no-op for PostgreSQL (upsert happens in UpsertChunk)
-func (p *Pool) ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string) error {
+func (p *Pool) ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string, mergeChunkSize int) error {
 	return nil
 }
 

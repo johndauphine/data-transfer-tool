@@ -773,7 +773,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				for i, c := range j.Table.Columns {
 					cols[i] = c.Name
 				}
-				if err := o.targetPool.ExecuteUpsertMerge(ctx, o.config.Target.Schema, j.Table.Name, cols, j.Table.PrimaryKey); err != nil {
+				if err := o.targetPool.ExecuteUpsertMerge(ctx, o.config.Target.Schema, j.Table.Name, cols, j.Table.PrimaryKey, o.config.Migration.UpsertMergeChunkSize); err != nil {
 					logging.Error("ExecuteUpsertMerge failed for %s: %v", j.Table.Name, err)
 					return nil, fmt.Errorf("upsert merge for %s: %w", j.Table.Name, err)
 				}
@@ -851,7 +851,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 					for i, c := range j.Table.Columns {
 						cols[i] = c.Name
 					}
-					if mergeErr := o.targetPool.ExecuteUpsertMerge(ctx, o.config.Target.Schema, j.Table.Name, cols, j.Table.PrimaryKey); mergeErr != nil {
+					if mergeErr := o.targetPool.ExecuteUpsertMerge(ctx, o.config.Target.Schema, j.Table.Name, cols, j.Table.PrimaryKey, o.config.Migration.UpsertMergeChunkSize); mergeErr != nil {
 						logging.Error("ExecuteUpsertMerge failed for %s: %v", j.Table.Name, mergeErr)
 						ts.jobsFailed++
 						ts.mu.Unlock()
