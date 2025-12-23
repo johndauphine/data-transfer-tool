@@ -26,7 +26,7 @@ echo "Formatting check passed."
 
 # Run tests
 echo "Running tests..."
-if ! go test ./... -count=1 -short; then
+if ! go test ./... -short; then
     echo ""
     echo "Tests failed. Please fix the failing tests before committing."
     exit 1

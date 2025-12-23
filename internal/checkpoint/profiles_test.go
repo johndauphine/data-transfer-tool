@@ -103,8 +103,14 @@ func TestEncryptProfileDifferentNonce(t *testing.T) {
 	}
 
 	// But both should decrypt to same plaintext
-	dec1, _ := decryptProfile(profileName, enc1)
-	dec2, _ := decryptProfile(profileName, enc2)
+	dec1, err := decryptProfile(profileName, enc1)
+	if err != nil {
+		t.Fatalf("first decryptProfile() error: %v", err)
+	}
+	dec2, err := decryptProfile(profileName, enc2)
+	if err != nil {
+		t.Fatalf("second decryptProfile() error: %v", err)
+	}
 
 	if string(dec1) != string(dec2) {
 		t.Error("decrypted values differ")

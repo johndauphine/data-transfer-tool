@@ -73,6 +73,7 @@ test-dbs-down:
 # Pre-commit hooks
 setup-hooks:
 	git config core.hooksPath .githooks
+	chmod +x .githooks/pre-commit
 	@echo "Git hooks configured to use .githooks directory"
 
 # Run all checks (useful for CI)

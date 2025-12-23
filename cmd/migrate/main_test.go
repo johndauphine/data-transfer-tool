@@ -92,7 +92,6 @@ func TestGetStateFile(t *testing.T) {
 
 func TestOutputJSON(t *testing.T) {
 	t.Run("output to stdout", func(t *testing.T) {
-		tmpDir := t.TempDir()
 		result := &orchestrator.MigrationResult{
 			RunID:           "test-run-123",
 			Status:          "success",
@@ -144,9 +143,6 @@ func TestOutputJSON(t *testing.T) {
 		if parsed.RunID != "test-run-123" {
 			t.Errorf("parsed.RunID = %q, want %q", parsed.RunID, "test-run-123")
 		}
-
-		// Clean up
-		_ = tmpDir
 	})
 
 	t.Run("output to file", func(t *testing.T) {
