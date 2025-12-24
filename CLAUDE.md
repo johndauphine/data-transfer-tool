@@ -258,6 +258,17 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ## Session History
 
+### Session 4: Same-Engine Migrations (Claude - December 23, 2025)
+1. Implemented PG→PG and MSSQL→MSSQL migrations with source-type aware DDL generation
+2. Added `sourceType` parameter to pool factory and target pools
+3. Updated DDL generation to use unified `typemap.MapType()` for all 4 directions
+4. Added IDENTITY_INSERT handling for MSSQL→MSSQL upsert mode
+5. Fixed SQL injection vulnerability in identity column detection (parameterized query)
+6. Added unit tests for DDL generation with all migration directions
+7. Tested all modes (drop_recreate, truncate, upsert) with SO2010 dataset
+8. Released v1.16.0 with same-engine migration support
+9. Updated README with new feature documentation and download URLs
+
 ### Session 3: Encrypted Profiles (Codex - December 20, 2025)
 1. Added encrypted profile storage in SQLite (AES-GCM)
 2. Added `profile.name` and `profile.description` to config schema
