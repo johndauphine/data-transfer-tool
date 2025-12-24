@@ -172,10 +172,18 @@ See `examples/config-upsert.yaml` for a complete example.
 | Re-run (no changes) | 3m49s | 84K rows/sec | Change detection skips updates |
 | Re-run (1 row modified) | 3m40s | 88K rows/sec | Only modified row updated |
 
+### Upsert Mode (MSSQL → PG)
+| Scenario | Time | Throughput | Notes |
+|----------|------|------------|-------|
+| Initial load (empty target) | 1m27s | 222K rows/sec | INSERT ON CONFLICT batches |
+| Re-run (no changes) | 1m23s | 233K rows/sec | IS DISTINCT FROM skips updates |
+| Re-run (1 row modified) | 1m59s | 163K rows/sec | Only modified row updated |
+
 **Key observations**:
-- Upsert initial load is ~8x slower than bulk copy due to staging table overhead
-- Subsequent syncs are faster because `EXCEPT`-based change detection skips unchanged rows
-- Memory-scaled chunk size (20K on 36GB) prevents SQL Server memory pressure
+- PostgreSQL upsert is ~4x faster than SQL Server upsert due to efficient `INSERT...ON CONFLICT`
+- MSSQL→PG upsert is only ~2.5x slower than bulk COPY (vs 8x for PG→MSSQL)
+- `IS DISTINCT FROM` provides efficient NULL-safe change detection
+- SQL Server staging table + UPDATE/INSERT pattern has higher overhead
 
 ## Building
 
