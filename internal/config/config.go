@@ -624,7 +624,8 @@ func (c *Config) validate() error {
 
 	// Same-engine migration validation: prevent migration to the exact same database
 	if c.Source.Type == c.Target.Type {
-		sameHost := c.Source.Host == c.Target.Host
+		// Use case-insensitive comparison for hostnames (RFC 1035)
+		sameHost := strings.EqualFold(c.Source.Host, c.Target.Host)
 		samePort := c.Source.Port == c.Target.Port
 		sameDB := c.Source.Database == c.Target.Database
 		if sameHost && samePort && sameDB {

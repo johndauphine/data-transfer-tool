@@ -109,8 +109,13 @@ func TestNormalizePostgresType(t *testing.T) {
 		{"float8", 0, 0, 0, "double precision"},
 		{"bool", 0, 0, 0, "boolean"},
 		{"bpchar", 10, 0, 0, "char(10)"},
+		{"bpchar", 0, 0, 0, "char(1)"}, // edge case: no length
 		{"character varying", 100, 0, 0, "varchar(100)"},
+		{"character varying", 0, 0, 0, "text"},                     // edge case: no length
+		{"character varying", 10485760, 0, 0, "varchar(10485760)"}, // edge case: max length
+		{"varchar", 0, 0, 0, "text"},                               // edge case: no length
 		{"numeric", 0, 18, 4, "numeric(18,4)"},
+		{"numeric", 0, 0, 0, "numeric"}, // edge case: no precision
 		{"timestamp without time zone", 0, 0, 0, "timestamp"},
 		{"timestamp with time zone", 0, 0, 0, "timestamptz"},
 		{"uuid", 0, 0, 0, "uuid"},   // passthrough

@@ -340,6 +340,20 @@ func TestSameEngineValidation(t *testing.T) {
 			targetDB:    "mydb",
 			expectError: false,
 		},
+		{
+			name:        "same database blocked (case-insensitive host)",
+			sourceType:  "postgres",
+			targetType:  "postgres",
+			targetMode:  "upsert",
+			sourceHost:  "LOCALHOST",
+			targetHost:  "localhost",
+			sourcePort:  5432,
+			targetPort:  5432,
+			sourceDB:    "mydb",
+			targetDB:    "mydb",
+			expectError: true,
+			errorMsg:    "source and target cannot be the same database",
+		},
 	}
 
 	for _, tt := range tests {

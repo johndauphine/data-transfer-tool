@@ -5,6 +5,9 @@ import (
 	"strings"
 )
 
+// PostgreSQL maximum varchar length before converting to text (1GB - 1 header byte)
+const pgMaxVarcharLength = 10485760
+
 // Direction represents the migration direction
 type Direction int
 
@@ -34,8 +37,9 @@ func IsSameEngine(sourceType, targetType string) bool {
 	return sourceType == targetType
 }
 
-// MapType converts a source type to the appropriate target type based on direction
-// For same-engine migrations, it normalizes but doesn't convert the type
+// MapType converts a source type to the appropriate target type based on direction.
+// For cross-engine migrations, converts types between database engines.
+// For same-engine migrations, normalizes types to canonical representations.
 func MapType(sourceType, targetType, dataType string, maxLength, precision, scale int) string {
 	direction := GetDirection(sourceType, targetType)
 
@@ -81,12 +85,12 @@ func NormalizePostgresType(pgType string, maxLength, precision, scale int) strin
 		}
 		return "char(1)"
 	case "character varying":
-		if maxLength > 0 && maxLength < 10485760 {
+		if maxLength > 0 && maxLength <= pgMaxVarcharLength {
 			return fmt.Sprintf("varchar(%d)", maxLength)
 		}
 		return "text"
 	case "varchar":
-		if maxLength > 0 && maxLength < 10485760 {
+		if maxLength > 0 && maxLength <= pgMaxVarcharLength {
 			return fmt.Sprintf("varchar(%d)", maxLength)
 		}
 		return "text"
