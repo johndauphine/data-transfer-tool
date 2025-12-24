@@ -147,7 +147,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	}
 
 	// Create target pool using factory
-	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, cfg.Migration.MSSQLRowsPerBatch)
+	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, cfg.Migration.MSSQLRowsPerBatch, cfg.Source.Type)
 	if err != nil {
 		sourcePool.Close()
 		return nil, fmt.Errorf("creating target pool: %w", err)

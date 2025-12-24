@@ -8,13 +8,14 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/typemap"
 )
 
-// GenerateDDL generates CREATE TABLE statement for PostgreSQL
+// GenerateDDL generates CREATE TABLE statement for PostgreSQL (assumes MSSQL source for backwards compatibility)
 func GenerateDDL(t *source.Table, targetSchema string) string {
-	return GenerateDDLWithOptions(t, targetSchema, false)
+	return GenerateDDLWithOptions(t, targetSchema, false, "mssql")
 }
 
 // GenerateDDLWithOptions generates CREATE TABLE with optional UNLOGGED
-func GenerateDDLWithOptions(t *source.Table, targetSchema string, unlogged bool) string {
+// sourceType indicates the source database type ("mssql" or "postgres") for type mapping
+func GenerateDDLWithOptions(t *source.Table, targetSchema string, unlogged bool, sourceType string) string {
 	var sb strings.Builder
 
 	tableType := "TABLE"
@@ -30,7 +31,7 @@ func GenerateDDLWithOptions(t *source.Table, targetSchema string, unlogged bool)
 			sb.WriteString(",\n")
 		}
 
-		pgType := typemap.MSSQLToPostgres(col.DataType, col.MaxLength, col.Precision, col.Scale)
+		pgType := typemap.MapType(sourceType, "postgres", col.DataType, col.MaxLength, col.Precision, col.Scale)
 
 		sb.WriteString(fmt.Sprintf("    %s %s", quotePGIdent(col.Name), pgType))
 

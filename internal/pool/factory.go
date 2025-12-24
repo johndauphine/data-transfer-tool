@@ -22,12 +22,13 @@ func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 
 // NewTargetPool creates a target pool based on the configuration type
 // mssqlRowsPerBatch is only used for MSSQL targets (ignored for PostgreSQL)
-func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int) (TargetPool, error) {
+// sourceType indicates the source database type ("mssql" or "postgres") for DDL generation
+func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int, sourceType string) (TargetPool, error) {
 	switch cfg.Type {
 	case "postgres", "":
-		return target.NewPool(cfg, maxConns)
+		return target.NewPool(cfg, maxConns, sourceType)
 	case "mssql":
-		return target.NewMSSQLPool(cfg, maxConns, mssqlRowsPerBatch)
+		return target.NewMSSQLPool(cfg, maxConns, mssqlRowsPerBatch, sourceType)
 	default:
 		return nil, fmt.Errorf("unsupported target type: %s", cfg.Type)
 	}

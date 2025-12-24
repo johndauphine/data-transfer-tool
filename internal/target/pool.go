@@ -22,13 +22,15 @@ type PoolStats struct {
 
 // Pool manages a pool of PostgreSQL connections
 type Pool struct {
-	pool     *pgxpool.Pool
-	config   *config.TargetConfig
-	maxConns int
+	pool       *pgxpool.Pool
+	config     *config.TargetConfig
+	maxConns   int
+	sourceType string // "mssql" or "postgres" - used for DDL generation
 }
 
 // NewPool creates a new PostgreSQL connection pool
-func NewPool(cfg *config.TargetConfig, maxConns int) (*Pool, error) {
+// sourceType indicates the source database type ("mssql" or "postgres") for DDL generation
+func NewPool(cfg *config.TargetConfig, maxConns int, sourceType string) (*Pool, error) {
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, cfg.SSLMode)
 
@@ -51,7 +53,7 @@ func NewPool(cfg *config.TargetConfig, maxConns int) (*Pool, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	return &Pool{pool: pool, config: cfg, maxConns: maxConns}, nil
+	return &Pool{pool: pool, config: cfg, maxConns: maxConns, sourceType: sourceType}, nil
 }
 
 // Close closes all connections in the pool
@@ -100,7 +102,7 @@ func (p *Pool) CreateTable(ctx context.Context, t *source.Table, targetSchema st
 
 // CreateTableWithOptions creates a table with optional UNLOGGED
 func (p *Pool) CreateTableWithOptions(ctx context.Context, t *source.Table, targetSchema string, unlogged bool) error {
-	ddl := GenerateDDLWithOptions(t, targetSchema, unlogged)
+	ddl := GenerateDDLWithOptions(t, targetSchema, unlogged, p.sourceType)
 
 	_, err := p.pool.Exec(ctx, ddl)
 	if err != nil {

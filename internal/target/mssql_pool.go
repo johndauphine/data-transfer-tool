@@ -18,12 +18,14 @@ type MSSQLPool struct {
 	db           *sql.DB
 	config       *config.TargetConfig
 	maxConns     int
-	rowsPerBatch int // Hint for bulk copy optimizer
-	compatLevel  int // Database compatibility level (e.g., 130 for SQL Server 2016)
+	rowsPerBatch int    // Hint for bulk copy optimizer
+	compatLevel  int    // Database compatibility level (e.g., 130 for SQL Server 2016)
+	sourceType   string // "mssql" or "postgres" - used for DDL generation
 }
 
 // NewMSSQLPool creates a new SQL Server target connection pool
-func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int) (*MSSQLPool, error) {
+// sourceType indicates the source database type ("mssql" or "postgres") for DDL generation
+func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int, sourceType string) (*MSSQLPool, error) {
 	trustCert := "false"
 	if cfg.TrustServerCert {
 		trustCert = "true"
@@ -65,6 +67,7 @@ func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int) (*MS
 		maxConns:     maxConns,
 		rowsPerBatch: rowsPerBatch,
 		compatLevel:  compatLevel,
+		sourceType:   sourceType,
 	}, nil
 }
 
@@ -115,7 +118,7 @@ func (p *MSSQLPool) CreateTable(ctx context.Context, t *source.Table, targetSche
 
 // CreateTableWithOptions creates a table (unlogged option ignored for MSSQL)
 func (p *MSSQLPool) CreateTableWithOptions(ctx context.Context, t *source.Table, targetSchema string, unlogged bool) error {
-	ddl := GenerateMSSQLDDL(t, targetSchema)
+	ddl := GenerateMSSQLDDL(t, targetSchema, p.sourceType)
 
 	_, err := p.db.ExecContext(ctx, ddl)
 	if err != nil {
@@ -441,6 +444,7 @@ func (p *MSSQLPool) PrepareUpsertStaging(ctx context.Context, schema, table stri
 // mergeChunkSize controls the chunk size for UPDATE+INSERT operations (0 = use default 5000)
 func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string, mergeChunkSize int) error {
 	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
+	targetTable := qualifyMSSQLTable(schema, table)
 
 	// Get row count and min/max PK from staging table
 	var rowCount int64
@@ -459,6 +463,22 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 		return nil
 	}
 
+	// Check if target table has identity columns. This is required whenever the target table
+	// uses identity/auto-increment columns (e.g., same-engine MSSQL or cross-engine migrations
+	// from sources with GENERATED AS IDENTITY).
+	var hasIdentity bool
+	identitySQL := `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM sys.columns c
+			JOIN sys.tables t ON c.object_id = t.object_id
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = @p1 AND t.name = @p2 AND c.is_identity = 1
+		) THEN 1 ELSE 0 END`
+	if err := p.db.QueryRowContext(ctx, identitySQL, schema, table).Scan(&hasIdentity); err != nil {
+		// Non-fatal - assume no identity and continue
+		hasIdentity = false
+	}
+
 	// Create index on staging table PK for efficient chunked operations
 	indexName := fmt.Sprintf("IX_staging_%s_pk", table)
 	var pkColList []string
@@ -474,6 +494,32 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 	// Build UPDATE and INSERT SQL templates
 	updateSQL, insertSQL := buildMSSQLUpsertSQL(schema, table, stagingTable, cols, pkCols)
 
+	// Helper to execute INSERT with IDENTITY_INSERT if needed
+	execInsert := func(sql string) error {
+		if hasIdentity {
+			// Must use same connection for SET IDENTITY_INSERT to work
+			conn, err := p.db.Conn(ctx)
+			if err != nil {
+				return fmt.Errorf("getting connection: %w", err)
+			}
+			defer conn.Close()
+
+			if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s ON", targetTable)); err != nil {
+				return fmt.Errorf("enabling identity insert: %w", err)
+			}
+			if _, err := conn.ExecContext(ctx, sql+" OPTION(MAXDOP 1)"); err != nil {
+				conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s OFF", targetTable))
+				return fmt.Errorf("executing insert with identity: %w", err)
+			}
+			if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s OFF", targetTable)); err != nil {
+				return fmt.Errorf("disabling identity insert: %w", err)
+			}
+			return nil
+		}
+		_, err := p.db.ExecContext(ctx, sql+" OPTION(MAXDOP 1)")
+		return err
+	}
+
 	// For small tables or degenerate PK ranges, execute single UPDATE + INSERT
 	if rowCount <= 50000 || minPK == maxPK {
 		if updateSQL != "" {
@@ -481,7 +527,7 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 				return fmt.Errorf("executing update: %w", err)
 			}
 		}
-		if _, err := p.db.ExecContext(ctx, insertSQL+" OPTION(MAXDOP 1)"); err != nil {
+		if err := execInsert(insertSQL); err != nil {
 			return fmt.Errorf("executing insert: %w", err)
 		}
 	} else {
@@ -517,7 +563,7 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 					return fmt.Errorf("executing chunked update (pk %d-%d): %w", start, end, err)
 				}
 			}
-			if _, err := p.db.ExecContext(ctx, chunkedInsert+" OPTION(MAXDOP 1)"); err != nil {
+			if err := execInsert(chunkedInsert); err != nil {
 				return fmt.Errorf("executing chunked insert (pk %d-%d): %w", start, end, err)
 			}
 
@@ -700,8 +746,9 @@ AND NOT EXISTS (
 	return updateSQL, insertSQL
 }
 
-// GenerateMSSQLDDL generates SQL Server DDL from source table metadata
-func GenerateMSSQLDDL(t *source.Table, targetSchema string) string {
+// GenerateMSSQLDDL generates CREATE TABLE statement for SQL Server
+// sourceType indicates the source database type ("mssql" or "postgres") for type mapping
+func GenerateMSSQLDDL(t *source.Table, targetSchema string, sourceType string) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", qualifyMSSQLTable(targetSchema, t.Name)))
@@ -711,8 +758,8 @@ func GenerateMSSQLDDL(t *source.Table, targetSchema string) string {
 			sb.WriteString(",\n")
 		}
 
-		// Map data type
-		mssqlType := typemap.PostgresToMSSQL(col.DataType, col.MaxLength, col.Precision, col.Scale)
+		// Map data type using unified type mapping
+		mssqlType := typemap.MapType(sourceType, "mssql", col.DataType, col.MaxLength, col.Precision, col.Scale)
 
 		sb.WriteString(fmt.Sprintf("    %s %s", quoteMSSQLIdent(col.Name), mssqlType))
 
