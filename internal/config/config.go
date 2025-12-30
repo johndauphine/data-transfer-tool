@@ -224,8 +224,10 @@ func (c *Config) applyDefaults() {
 	c.autoConfig.OriginalSampleSize = c.Migration.SampleSize
 	c.autoConfig.OriginalUpsertMergeChunkSize = c.Migration.UpsertMergeChunkSize
 
-	// Detect system resources
-	c.autoConfig.CPUCores = runtime.NumCPU()
+	// Detect system resources (only if not already set, for testing)
+	if c.autoConfig.CPUCores == 0 {
+		c.autoConfig.CPUCores = runtime.NumCPU()
+	}
 	c.autoConfig.AvailableMemoryMB = getAvailableMemoryMB()
 
 	// Calculate target memory for auto-tuning (50% of limit)
@@ -342,11 +344,38 @@ func (c *Config) applyDefaults() {
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
 	}
+	// Auto-tune parallel writers based on CPU cores and target type
+	// MSSQL targets: very conservative (2) due to TABLOCK bulk insert serialization
+	// PostgreSQL targets: moderate (2-4) as COPY handles parallelism well
 	if c.Migration.WriteAheadWriters == 0 {
-		c.Migration.WriteAheadWriters = 2 // Default: 2 parallel writers per job
+		if c.Target.Type == "mssql" {
+			// MSSQL: TABLOCK serializes writes, more writers = more contention
+			c.Migration.WriteAheadWriters = 2
+		} else {
+			// PostgreSQL: COPY handles parallelism well
+			cores := c.autoConfig.CPUCores
+			writers := cores / 4
+			if writers < 2 {
+				writers = 2
+			}
+			if writers > 4 {
+				writers = 4
+			}
+			c.Migration.WriteAheadWriters = writers
+		}
 	}
+	// Auto-tune parallel readers based on CPU cores
+	// Conservative defaults to avoid overwhelming source database
 	if c.Migration.ParallelReaders == 0 {
-		c.Migration.ParallelReaders = 2 // Default: 2 parallel readers per job
+		cores := c.autoConfig.CPUCores
+		readers := cores / 4
+		if readers < 2 {
+			readers = 2
+		}
+		if readers > 4 {
+			readers = 4
+		}
+		c.Migration.ParallelReaders = readers
 	}
 	// MSSQLRowsPerBatch defaults to chunk_size (set after chunk_size is finalized)
 	// This is applied later since it depends on ChunkSize being set
@@ -940,10 +969,17 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  MaxPgConnections: %s\n", formatAutoValue(c.Migration.MaxPgConnections, ac.OriginalMaxPgConns, pgConnsExpl)))
 
 	// WriteAheadWriters
-	b.WriteString(fmt.Sprintf("  WriteAheadWriters: %s\n", formatAutoValue(c.Migration.WriteAheadWriters, ac.OriginalWriteAheadWriters, "default 2")))
+	var writersExpl string
+	if c.Target.Type == "mssql" {
+		writersExpl = "fixed 2 (MSSQL TABLOCK)"
+	} else {
+		writersExpl = fmt.Sprintf("cores/4 clamped 2-4, %d cores", ac.CPUCores)
+	}
+	b.WriteString(fmt.Sprintf("  WriteAheadWriters: %s\n", formatAutoValue(c.Migration.WriteAheadWriters, ac.OriginalWriteAheadWriters, writersExpl)))
 
 	// ParallelReaders
-	b.WriteString(fmt.Sprintf("  ParallelReaders: %s\n", formatAutoValue(c.Migration.ParallelReaders, ac.OriginalParallelReaders, "default 2")))
+	readersExpl := fmt.Sprintf("cores/4 clamped 2-4, %d cores", ac.CPUCores)
+	b.WriteString(fmt.Sprintf("  ParallelReaders: %s\n", formatAutoValue(c.Migration.ParallelReaders, ac.OriginalParallelReaders, readersExpl)))
 
 	// LargeTableThreshold
 	b.WriteString(fmt.Sprintf("  LargeTableThreshold: %s\n", formatAutoValue64(c.Migration.LargeTableThreshold, ac.OriginalLargeTableThresh, "default 5M")))

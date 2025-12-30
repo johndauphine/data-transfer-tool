@@ -396,3 +396,172 @@ func TestSameEngineValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestAutoTuneWriteAheadWriters(t *testing.T) {
+	tests := []struct {
+		name        string
+		targetType  string
+		cpuCores    int
+		expected    int
+	}{
+		{"MSSQL 16 cores - fixed at 2", "mssql", 16, 2},
+		{"MSSQL 8 cores - fixed at 2", "mssql", 8, 2},
+		{"MSSQL 2 cores - fixed at 2", "mssql", 2, 2},
+		{"PostgreSQL 16 cores - capped at 4", "postgres", 16, 4},
+		{"PostgreSQL 8 cores - cores/4=2", "postgres", 8, 2},
+		{"PostgreSQL 4 cores - cores/4=1 clamped to 2", "postgres", 4, 2},
+		{"PostgreSQL 2 cores - cores/4=0 clamped to 2", "postgres", 2, 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Source: SourceConfig{
+					Type:     "postgres",
+					Host:     "localhost",
+					Port:     5432,
+					Database: "source",
+					User:     "user",
+					Password: "pass",
+				},
+				Target: TargetConfig{
+					Type:     tt.targetType,
+					Host:     "localhost",
+					Port:     5432,
+					Database: "target",
+					User:     "user",
+					Password: "pass",
+				},
+			}
+			cfg.autoConfig.CPUCores = tt.cpuCores
+			cfg.applyDefaults()
+
+			if cfg.Migration.WriteAheadWriters != tt.expected {
+				t.Errorf("expected %d writers for %s with %d cores, got %d",
+					tt.expected, tt.targetType, tt.cpuCores, cfg.Migration.WriteAheadWriters)
+			}
+		})
+	}
+}
+
+func TestAutoTuneParallelReaders(t *testing.T) {
+	tests := []struct {
+		name     string
+		cpuCores int
+		expected int
+	}{
+		{"16 cores - capped at 4", 16, 4},
+		{"8 cores - cores/4=2", 8, 2},
+		{"4 cores - cores/4=1 clamped to 2", 4, 2},
+		{"2 cores - cores/4=0 clamped to 2", 2, 2},
+		{"1 core - clamped to 2", 1, 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Source: SourceConfig{
+					Type:     "postgres",
+					Host:     "localhost",
+					Port:     5432,
+					Database: "source",
+					User:     "user",
+					Password: "pass",
+				},
+				Target: TargetConfig{
+					Type:     "postgres",
+					Host:     "localhost",
+					Port:     5433,
+					Database: "target",
+					User:     "user",
+					Password: "pass",
+				},
+			}
+			cfg.autoConfig.CPUCores = tt.cpuCores
+			cfg.applyDefaults()
+
+			if cfg.Migration.ParallelReaders != tt.expected {
+				t.Errorf("expected %d readers for %d cores, got %d",
+					tt.expected, tt.cpuCores, cfg.Migration.ParallelReaders)
+			}
+		})
+	}
+}
+
+func TestAutoTuneUserOverride(t *testing.T) {
+	// User-specified values should not be overridden by auto-tuning
+	cfg := &Config{
+		Source: SourceConfig{
+			Type:     "postgres",
+			Host:     "localhost",
+			Port:     5432,
+			Database: "source",
+			User:     "user",
+			Password: "pass",
+		},
+		Target: TargetConfig{
+			Type:     "mssql",
+			Host:     "localhost",
+			Port:     1433,
+			Database: "target",
+			User:     "user",
+			Password: "pass",
+		},
+		Migration: MigrationConfig{
+			WriteAheadWriters: 8, // User-specified
+			ParallelReaders:   6, // User-specified
+		},
+	}
+	cfg.autoConfig.CPUCores = 16
+	cfg.applyDefaults()
+
+	// User values should be preserved
+	if cfg.Migration.WriteAheadWriters != 8 {
+		t.Errorf("expected user-specified 8 writers, got %d", cfg.Migration.WriteAheadWriters)
+	}
+	if cfg.Migration.ParallelReaders != 6 {
+		t.Errorf("expected user-specified 6 readers, got %d", cfg.Migration.ParallelReaders)
+	}
+}
+
+func TestAutoTuneConnectionPoolSizing(t *testing.T) {
+	cfg := &Config{
+		Source: SourceConfig{
+			Type:     "postgres",
+			Host:     "localhost",
+			Port:     5432,
+			Database: "source",
+			User:     "user",
+			Password: "pass",
+		},
+		Target: TargetConfig{
+			Type:     "postgres",
+			Host:     "localhost",
+			Port:     5433,
+			Database: "target",
+			User:     "user",
+			Password: "pass",
+		},
+		Migration: MigrationConfig{
+			Workers: 4,
+		},
+	}
+	cfg.autoConfig.CPUCores = 8
+	cfg.autoConfig.AvailableMemoryMB = 8192
+	cfg.applyDefaults()
+
+	// With 8 cores: readers=2, writers=2
+	// Source connections: workers * readers + 4 = 4 * 2 + 4 = 12
+	// Target connections: workers * writers + 4 = 4 * 2 + 4 = 12
+	expectedMSSQLConns := cfg.Migration.Workers*cfg.Migration.ParallelReaders + 4
+	expectedPGConns := cfg.Migration.Workers*cfg.Migration.WriteAheadWriters + 4
+
+	if cfg.Migration.MaxMssqlConnections < expectedMSSQLConns {
+		t.Errorf("insufficient MSSQL connections: got %d, need at least %d",
+			cfg.Migration.MaxMssqlConnections, expectedMSSQLConns)
+	}
+	if cfg.Migration.MaxPgConnections < expectedPGConns {
+		t.Errorf("insufficient PG connections: got %d, need at least %d",
+			cfg.Migration.MaxPgConnections, expectedPGConns)
+	}
+}
