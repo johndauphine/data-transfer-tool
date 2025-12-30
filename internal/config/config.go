@@ -393,8 +393,7 @@ func (c *Config) applyDefaults() {
 		}
 	}
 
-	// MEMORY SAFETY: Ensure we never exceed available memory
-	// Use conservative estimate with 2KB/row (accounts for large text columns)
+	// Calculate effective memory limit for Go GC soft limit
 	// Hard cap at 70% of available memory to leave room for OS and other processes
 	hardCapMB := c.autoConfig.AvailableMemoryMB * 70 / 100
 	effectiveMaxMB := hardCapMB
@@ -403,38 +402,8 @@ func (c *Config) applyDefaults() {
 		if c.Migration.MaxMemoryMB < hardCapMB {
 			effectiveMaxMB = c.Migration.MaxMemoryMB
 		}
-		// If user requested more than 70%, silently cap it
 	}
 	c.autoConfig.EffectiveMaxMemoryMB = effectiveMaxMB
-	maxMemoryBytes := effectiveMaxMB * 1024 * 1024
-	conservativeRowSize := int64(2000) // 2KB per row - safer for text-heavy tables
-	for {
-		estimatedMemory := int64(c.Migration.Workers) *
-			int64(c.Migration.ReadAheadBuffers*2) * // read + write buffers
-			int64(c.Migration.ChunkSize) *
-			conservativeRowSize
-
-		if estimatedMemory <= maxMemoryBytes {
-			break // We're within limits
-		}
-
-		// Reduce settings to fit within memory
-		// Priority: reduce buffers first, then chunk size, then workers
-		if c.Migration.ReadAheadBuffers > 4 {
-			c.Migration.ReadAheadBuffers--
-			continue
-		}
-		if c.Migration.ChunkSize > 50000 {
-			c.Migration.ChunkSize = c.Migration.ChunkSize * 80 / 100 // Reduce by 20%
-			continue
-		}
-		if c.Migration.Workers > 4 {
-			c.Migration.Workers--
-			continue
-		}
-		// Can't reduce further, use minimum settings
-		break
-	}
 
 	// Auto-size connection pools based on workers, readers, and writers
 	// Each worker needs: parallel_readers source connections + write_ahead_writers target connections
