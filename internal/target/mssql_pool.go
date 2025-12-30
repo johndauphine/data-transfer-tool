@@ -158,25 +158,11 @@ func (p *MSSQLPool) TableExists(ctx context.Context, schema, table string) (bool
 	return err == nil, err
 }
 
-// CreatePrimaryKey creates a primary key on the table
+// CreatePrimaryKey is a no-op for MSSQL because we create the PK with the table DDL.
+// This enables efficient sorted bulk insert when data arrives in PK order.
 func (p *MSSQLPool) CreatePrimaryKey(ctx context.Context, t *source.Table, targetSchema string) error {
-	if len(t.PrimaryKey) == 0 {
-		return nil
-	}
-
-	pkCols := ""
-	for i, col := range t.PrimaryKey {
-		if i > 0 {
-			pkCols += ", "
-		}
-		pkCols += quoteMSSQLIdent(col)
-	}
-
-	sql := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)",
-		qualifyMSSQLTable(targetSchema, t.Name), pkCols)
-
-	_, err := p.db.ExecContext(ctx, sql)
-	return err
+	// PK is already created in GenerateMSSQLDDL - nothing to do here
+	return nil
 }
 
 // GetRowCount returns the row count for a table
@@ -748,6 +734,7 @@ AND NOT EXISTS (
 
 // GenerateMSSQLDDL generates CREATE TABLE statement for SQL Server
 // sourceType indicates the source database type ("mssql" or "postgres") for type mapping
+// Includes PRIMARY KEY constraint in CREATE TABLE to enable sorted bulk insert
 func GenerateMSSQLDDL(t *source.Table, targetSchema string, sourceType string) string {
 	var sb strings.Builder
 
@@ -774,6 +761,23 @@ func GenerateMSSQLDDL(t *source.Table, targetSchema string, sourceType string) s
 		} else {
 			sb.WriteString(" NULL")
 		}
+	}
+
+	// Add PRIMARY KEY constraint if table has one
+	// This enables efficient sorted bulk insert (data arrives in PK order)
+	if len(t.PrimaryKey) > 0 {
+		pkCols := make([]string, len(t.PrimaryKey))
+		for i, col := range t.PrimaryKey {
+			pkCols[i] = quoteMSSQLIdent(col)
+		}
+		// Generate constraint name with MSSQL 128-char limit
+		pkName := fmt.Sprintf("PK_%s", t.Name)
+		if len(pkName) > 128 {
+			pkName = pkName[:128]
+		}
+		sb.WriteString(fmt.Sprintf(",\n    CONSTRAINT %s PRIMARY KEY CLUSTERED (%s)",
+			quoteMSSQLIdent(pkName),
+			strings.Join(pkCols, ", ")))
 	}
 
 	sb.WriteString("\n)")
