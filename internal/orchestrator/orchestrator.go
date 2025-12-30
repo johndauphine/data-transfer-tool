@@ -360,8 +360,10 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		}
 	} else if o.config.Migration.TargetMode == "truncate" {
 		logging.Info("Preparing target tables (truncate mode)...")
-		for i, t := range tables {
-			logging.Debug("  [%d/%d] %s", i+1, len(tables), t.Name)
+		// First check which tables exist vs need to be created
+		var tablesToTruncate []source.Table
+		var tablesToCreate []source.Table
+		for _, t := range tables {
 			exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
 			if err != nil {
 				o.state.CompleteRun(runID, "failed", err.Error())
@@ -369,34 +371,101 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 				return fmt.Errorf("checking if table %s exists: %w", t.Name, err)
 			}
 			if exists {
-				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
-					o.state.CompleteRun(runID, "failed", err.Error())
-					o.notifyFailure(runID, err, time.Since(startTime))
-					return fmt.Errorf("truncating table %s: %w", t.Name, err)
-				}
+				tablesToTruncate = append(tablesToTruncate, t)
 			} else {
-				if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
-					o.state.CompleteRun(runID, "failed", err.Error())
-					o.notifyFailure(runID, err, time.Since(startTime))
-					return fmt.Errorf("creating table %s: %w", t.FullName(), err)
-				}
+				tablesToCreate = append(tablesToCreate, t)
+			}
+		}
+
+		// Parallel truncation
+		if len(tablesToTruncate) > 0 {
+			logging.Debug("  Truncating %d existing tables in parallel...", len(tablesToTruncate))
+			var truncWg sync.WaitGroup
+			truncErrs := make(chan error, len(tablesToTruncate))
+			for _, t := range tablesToTruncate {
+				truncWg.Add(1)
+				go func(table source.Table) {
+					defer truncWg.Done()
+					if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, table.Name); err != nil {
+						truncErrs <- fmt.Errorf("truncating table %s: %w", table.Name, err)
+					}
+				}(t)
+			}
+			truncWg.Wait()
+			close(truncErrs)
+			if err := <-truncErrs; err != nil {
+				o.state.CompleteRun(runID, "failed", err.Error())
+				o.notifyFailure(runID, err, time.Since(startTime))
+				return err
+			}
+		}
+
+		// Parallel table creation for non-existing tables
+		if len(tablesToCreate) > 0 {
+			logging.Debug("  Creating %d new tables in parallel...", len(tablesToCreate))
+			var createWg sync.WaitGroup
+			createErrs := make(chan error, len(tablesToCreate))
+			for _, t := range tablesToCreate {
+				createWg.Add(1)
+				go func(table source.Table) {
+					defer createWg.Done()
+					if err := o.targetPool.CreateTable(ctx, &table, o.config.Target.Schema); err != nil {
+						createErrs <- fmt.Errorf("creating table %s: %w", table.FullName(), err)
+					}
+				}(t)
+			}
+			createWg.Wait()
+			close(createErrs)
+			if err := <-createErrs; err != nil {
+				o.state.CompleteRun(runID, "failed", err.Error())
+				o.notifyFailure(runID, err, time.Since(startTime))
+				return err
 			}
 		}
 	} else {
 		// Default: drop_recreate
 		logging.Info("Creating target tables (drop and recreate)...")
-		for i, t := range tables {
-			logging.Debug("  [%d/%d] %s", i+1, len(tables), t.Name)
-			if err := o.targetPool.DropTable(ctx, o.config.Target.Schema, t.Name); err != nil {
-				o.state.CompleteRun(runID, "failed", err.Error())
-				o.notifyFailure(runID, err, time.Since(startTime))
-				return fmt.Errorf("dropping table %s: %w", t.Name, err)
-			}
-			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
-				o.state.CompleteRun(runID, "failed", err.Error())
-				o.notifyFailure(runID, err, time.Since(startTime))
-				return fmt.Errorf("creating table %s: %w", t.FullName(), err)
-			}
+
+		// Phase 1: Drop all tables in parallel (no FK dependencies since we're dropping)
+		logging.Debug("  Dropping %d tables in parallel...", len(tables))
+		var dropWg sync.WaitGroup
+		dropErrs := make(chan error, len(tables))
+		for _, t := range tables {
+			dropWg.Add(1)
+			go func(table source.Table) {
+				defer dropWg.Done()
+				if err := o.targetPool.DropTable(ctx, o.config.Target.Schema, table.Name); err != nil {
+					dropErrs <- fmt.Errorf("dropping table %s: %w", table.Name, err)
+				}
+			}(t)
+		}
+		dropWg.Wait()
+		close(dropErrs)
+		if err := <-dropErrs; err != nil {
+			o.state.CompleteRun(runID, "failed", err.Error())
+			o.notifyFailure(runID, err, time.Since(startTime))
+			return err
+		}
+
+		// Phase 2: Create all tables in parallel (no FKs yet, just tables)
+		logging.Debug("  Creating %d tables in parallel...", len(tables))
+		var createWg sync.WaitGroup
+		createErrs := make(chan error, len(tables))
+		for _, t := range tables {
+			createWg.Add(1)
+			go func(table source.Table) {
+				defer createWg.Done()
+				if err := o.targetPool.CreateTable(ctx, &table, o.config.Target.Schema); err != nil {
+					createErrs <- fmt.Errorf("creating table %s: %w", table.FullName(), err)
+				}
+			}(t)
+		}
+		createWg.Wait()
+		close(createErrs)
+		if err := <-createErrs; err != nil {
+			o.state.CompleteRun(runID, "failed", err.Error())
+			o.notifyFailure(runID, err, time.Since(startTime))
+			return err
 		}
 	}
 
@@ -708,13 +777,32 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	// Skip this in upsert mode - upserts are idempotent and don't require truncation.
 	// Non-partitioned tables are truncated inside transfer.Execute as before.
 	if !resume && o.config.Migration.TargetMode != "upsert" {
-		truncatedTables := make(map[string]bool)
+		// Collect unique table names that need truncation
+		tablesToTruncate := make(map[string]bool)
 		for _, j := range jobs {
-			if j.Partition != nil && !truncatedTables[j.Table.Name] {
-				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, j.Table.Name); err != nil {
-					return nil, fmt.Errorf("pre-truncating table %s: %w", j.Table.Name, err)
-				}
-				truncatedTables[j.Table.Name] = true
+			if j.Partition != nil {
+				tablesToTruncate[j.Table.Name] = true
+			}
+		}
+
+		// Parallel truncation of partitioned tables
+		if len(tablesToTruncate) > 0 {
+			logging.Debug("Pre-truncating %d partitioned tables in parallel...", len(tablesToTruncate))
+			var truncWg sync.WaitGroup
+			truncErrs := make(chan error, len(tablesToTruncate))
+			for tableName := range tablesToTruncate {
+				truncWg.Add(1)
+				go func(tname string) {
+					defer truncWg.Done()
+					if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, tname); err != nil {
+						truncErrs <- fmt.Errorf("pre-truncating table %s: %w", tname, err)
+					}
+				}(tableName)
+			}
+			truncWg.Wait()
+			close(truncErrs)
+			if err := <-truncErrs; err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -942,56 +1030,109 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 }
 
 func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) error {
-	// Phase 1: Reset sequences
+	// Phase 1: Reset sequences (parallel - no dependencies between tables)
 	logging.Debug("  Resetting sequences...")
+	var seqWg sync.WaitGroup
 	for _, t := range tables {
-		if err := o.targetPool.ResetSequence(ctx, o.config.Target.Schema, &t); err != nil {
-			logging.Warn("Warning: resetting sequence for %s: %v", t.Name, err)
-		}
+		seqWg.Add(1)
+		go func(table source.Table) {
+			defer seqWg.Done()
+			if err := o.targetPool.ResetSequence(ctx, o.config.Target.Schema, &table); err != nil {
+				logging.Warn("Warning: resetting sequence for %s: %v", table.Name, err)
+			}
+		}(t)
 	}
+	seqWg.Wait()
 
-	// Phase 2: Create primary keys
+	// Phase 2: Create primary keys (parallel - no dependencies between tables)
 	logging.Debug("  Creating primary keys...")
+	var pkWg sync.WaitGroup
 	for _, t := range tables {
-		if err := o.targetPool.CreatePrimaryKey(ctx, &t, o.config.Target.Schema); err != nil {
-			logging.Warn("Warning: creating PK for %s: %v", t.Name, err)
-		}
+		pkWg.Add(1)
+		go func(table source.Table) {
+			defer pkWg.Done()
+			if err := o.targetPool.CreatePrimaryKey(ctx, &table, o.config.Target.Schema); err != nil {
+				logging.Warn("Warning: creating PK for %s: %v", table.Name, err)
+			}
+		}(t)
 	}
+	pkWg.Wait()
 
-	// Phase 3: Create indexes (if enabled)
+	// Phase 3: Create indexes (if enabled) - parallel per table
 	if o.config.Migration.CreateIndexes {
-		logging.Debug("  Creating indexes...")
+		// Count total indexes for logging
+		totalIndexes := 0
+		for _, t := range tables {
+			totalIndexes += len(t.Indexes)
+		}
+		if totalIndexes > 0 {
+			logging.Debug("  Creating %d indexes in parallel...", totalIndexes)
+		}
+
+		var idxWg sync.WaitGroup
 		for _, t := range tables {
 			for _, idx := range t.Indexes {
-				if err := o.targetPool.CreateIndex(ctx, &t, &idx, o.config.Target.Schema); err != nil {
-					logging.Warn("Warning: creating index %s on %s: %v", idx.Name, t.Name, err)
-				}
+				idxWg.Add(1)
+				go func(table source.Table, index source.Index) {
+					defer idxWg.Done()
+					if err := o.targetPool.CreateIndex(ctx, &table, &index, o.config.Target.Schema); err != nil {
+						logging.Warn("Warning: creating index %s on %s: %v", index.Name, table.Name, err)
+					}
+				}(t, idx)
 			}
 		}
+		idxWg.Wait()
 	}
 
-	// Phase 4: Create foreign keys (if enabled)
+	// Phase 4: Create foreign keys (if enabled) - parallel per table
+	// Note: FKs can be created in parallel since all tables and PKs exist at this point
 	if o.config.Migration.CreateForeignKeys {
-		logging.Debug("  Creating foreign keys...")
+		totalFKs := 0
+		for _, t := range tables {
+			totalFKs += len(t.ForeignKeys)
+		}
+		if totalFKs > 0 {
+			logging.Debug("  Creating %d foreign keys in parallel...", totalFKs)
+		}
+
+		var fkWg sync.WaitGroup
 		for _, t := range tables {
 			for _, fk := range t.ForeignKeys {
-				if err := o.targetPool.CreateForeignKey(ctx, &t, &fk, o.config.Target.Schema); err != nil {
-					logging.Warn("Warning: creating FK %s on %s: %v", fk.Name, t.Name, err)
-				}
+				fkWg.Add(1)
+				go func(table source.Table, foreignKey source.ForeignKey) {
+					defer fkWg.Done()
+					if err := o.targetPool.CreateForeignKey(ctx, &table, &foreignKey, o.config.Target.Schema); err != nil {
+						logging.Warn("Warning: creating FK %s on %s: %v", foreignKey.Name, table.Name, err)
+					}
+				}(t, fk)
 			}
 		}
+		fkWg.Wait()
 	}
 
-	// Phase 5: Create check constraints (if enabled)
+	// Phase 5: Create check constraints (if enabled) - parallel per table
 	if o.config.Migration.CreateCheckConstraints {
-		logging.Debug("  Creating check constraints...")
+		totalChecks := 0
+		for _, t := range tables {
+			totalChecks += len(t.CheckConstraints)
+		}
+		if totalChecks > 0 {
+			logging.Debug("  Creating %d check constraints in parallel...", totalChecks)
+		}
+
+		var chkWg sync.WaitGroup
 		for _, t := range tables {
 			for _, chk := range t.CheckConstraints {
-				if err := o.targetPool.CreateCheckConstraint(ctx, &t, &chk, o.config.Target.Schema); err != nil {
-					logging.Warn("Warning: creating CHECK %s on %s: %v", chk.Name, t.Name, err)
-				}
+				chkWg.Add(1)
+				go func(table source.Table, check source.CheckConstraint) {
+					defer chkWg.Done()
+					if err := o.targetPool.CreateCheckConstraint(ctx, &table, &check, o.config.Target.Schema); err != nil {
+						logging.Warn("Warning: creating CHECK %s on %s: %v", check.Name, table.Name, err)
+					}
+				}(t, chk)
 			}
 		}
+		chkWg.Wait()
 	}
 
 	return nil
