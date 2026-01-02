@@ -14,7 +14,7 @@ func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 	case "mssql", "":
 		return source.NewPool(cfg, maxConns)
 	case "postgres":
-		return source.NewPostgresPool(cfg, maxConns)
+		return source.NewPgxSourcePool(cfg, maxConns)
 	default:
 		return nil, fmt.Errorf("unsupported source type: %s", cfg.Type)
 	}

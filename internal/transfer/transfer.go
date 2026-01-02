@@ -557,6 +557,7 @@ func executeKeysetPagination(
 		readerWg.Add(1)
 		go func(rangeMinPK, rangeMaxPK any) {
 			defer readerWg.Done()
+
 			lastPK := rangeMinPK
 
 			for {
