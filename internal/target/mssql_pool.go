@@ -432,7 +432,11 @@ func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table str
 	}
 
 	// Acquire a dedicated connection for this chunk
-	// This is required because #temp tables are session-scoped
+	// #temp tables are session-scoped in SQL Server, so we need a single connection
+	// for the entire create->bulk insert->merge workflow.
+	// Note: Each chunk gets its own connection, so the temp table is recreated per chunk.
+	// This is acceptable because the bulk insert + merge is the expensive operation,
+	// and connection pooling minimizes connection overhead.
 	conn, err := p.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquiring connection: %w", err)
@@ -443,14 +447,9 @@ func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table str
 	// #tables are auto-dropped when connection closes (handles crashes gracefully)
 	stagingTable := safeMSSQLStagingName(table, writerID, partitionID)
 
-	// 2. Create temp table if not exists, otherwise truncate for reuse
+	// 2. Create temp table (fresh for each chunk since we get a new connection)
 	targetTable := qualifyMSSQLTable(schema, table)
-	createSQL := fmt.Sprintf(`
-		IF OBJECT_ID('tempdb..%s') IS NULL
-			SELECT TOP 0 * INTO %s FROM %s
-		ELSE
-			TRUNCATE TABLE %s`,
-		stagingTable, stagingTable, targetTable, stagingTable)
+	createSQL := fmt.Sprintf(`SELECT TOP 0 * INTO %s FROM %s`, stagingTable, targetTable)
 	if _, err := conn.ExecContext(ctx, createSQL); err != nil {
 		return fmt.Errorf("creating staging table: %w", err)
 	}
@@ -618,8 +617,11 @@ func (p *MSSQLPool) executeMergeWithRetry(ctx context.Context, conn *sql.Conn,
 			if _, err = conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s ON", targetTable)); err != nil {
 				return fmt.Errorf("enabling identity insert: %w", err)
 			}
+			// Use defer-like pattern to ensure IDENTITY_INSERT is disabled even on error
 			_, err = conn.ExecContext(ctx, mergeSQL)
-			conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s OFF", targetTable))
+			if _, disableErr := conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s OFF", targetTable)); disableErr != nil {
+				logging.Warn("Failed to disable IDENTITY_INSERT on %s: %v", targetTable, disableErr)
+			}
 		} else {
 			_, err = conn.ExecContext(ctx, mergeSQL)
 		}

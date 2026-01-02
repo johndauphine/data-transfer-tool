@@ -1198,8 +1198,9 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 	}
 }
 
-// writeChunkUpsert writes a chunk of data using upsert (INSERT ON CONFLICT / MERGE)
-// Deprecated: Use writeChunkUpsertWithWriter for better performance
+// writeChunkUpsert writes a chunk of data using upsert (INSERT ON CONFLICT / MERGE).
+//
+// Deprecated: Use writeChunkUpsertWithWriter for better performance.
 func writeChunkUpsert(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, pkCols []string, rows [][]any) error {
 	return tgtPool.UpsertChunk(ctx, schema, table, cols, pkCols, rows)
 }

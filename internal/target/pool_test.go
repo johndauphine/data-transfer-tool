@@ -157,8 +157,3 @@ func TestBuildPGStagingMergeSQL(t *testing.T) {
 		})
 	}
 }
-
-// Helper function
-func intPtr(i int) *int {
-	return &i
-}
