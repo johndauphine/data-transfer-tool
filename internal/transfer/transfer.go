@@ -643,7 +643,15 @@ func executeKeysetPagination(
 	// Start write workers
 	useUpsert := cfg.Migration.TargetMode == "upsert"
 	pkCols := job.Table.PrimaryKey
+
+	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
+	var partitionID *int
+	if job.Partition != nil {
+		partitionID = &job.Partition.PartitionID
+	}
+
 	for i := 0; i < numWriters; i++ {
+		writerID := i // Capture for closure
 		writerWg.Add(1)
 		go func() {
 			defer writerWg.Done()
@@ -657,7 +665,8 @@ func executeKeysetPagination(
 				writeStart := time.Now()
 				var err error
 				if useUpsert {
-					err = writeChunkUpsert(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, pkCols, rows)
+					// Use high-performance staging table approach
+					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, pkCols, rows, writerID, partitionID)
 				} else {
 					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, rows)
 				}
@@ -1042,12 +1051,19 @@ func executeRowNumberPagination(
 // scanRows scans database rows into a slice of values with proper type handling
 func scanRows(rows *sql.Rows, cols, colTypes []string) ([][]any, any, error) {
 	numCols := len(cols)
+	// Pre-allocate result capacity to avoid resizing (heuristic: common chunk size is 10k-100k)
+	// We don't know the exact chunk size here, but we can start with a reasonable default
+	// or rely on the caller to provide it. For now, we start with 0 capacity but let append grow it.
+	// A better optimization would be passing expected chunk size, but standard slice growth is decent.
+	// However, we CAN optimize the pointers slice reuse.
 	var result [][]any
 	var lastPK any
 
+	// Reuse pointers slice to avoid allocation per row
+	ptrs := make([]any, numCols)
+
 	for rows.Next() {
 		row := make([]any, numCols)
-		ptrs := make([]any, numCols)
 		for i := range row {
 			ptrs[i] = &row[i]
 		}
@@ -1062,9 +1078,12 @@ func scanRows(rows *sql.Rows, cols, colTypes []string) ([][]any, any, error) {
 		}
 
 		result = append(result, row)
-		if len(result) > 0 {
-			lastPK = result[len(result)-1][0] // Assume first column is PK for keyset
-		}
+		// Update lastPK only if we have rows (optimization: do it outside loop if possible,
+		// but for keyset we need the last one. We can just do it once at the end)
+	}
+
+	if len(result) > 0 {
+		lastPK = result[len(result)-1][0] // Assume first column is PK for keyset
 	}
 
 	return result, lastPK, rows.Err()
