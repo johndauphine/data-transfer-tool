@@ -94,7 +94,7 @@ go build -o mssql-pg-migrate .
 ```yaml
 migration:
   workers: 6
-  chunk_size: 50000  # 50000 for upsert
+  chunk_size: 50000  # chunk size per worker, tuned for upsert mode
   target_mode: drop_recreate  # or upsert
   create_indexes: false
   create_foreign_keys: false

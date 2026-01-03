@@ -1048,14 +1048,10 @@ func executeRowNumberPagination(
 	return stats, nil
 }
 
-// scanRows scans database rows into a slice of values with proper type handling
+// scanRows scans database rows into a slice of values with proper type handling.
 func scanRows(rows *sql.Rows, cols, colTypes []string) ([][]any, any, error) {
 	numCols := len(cols)
-	// Pre-allocate result capacity to avoid resizing (heuristic: common chunk size is 10k-100k)
-	// We don't know the exact chunk size here, but we can start with a reasonable default
-	// or rely on the caller to provide it. For now, we start with 0 capacity but let append grow it.
-	// A better optimization would be passing expected chunk size, but standard slice growth is decent.
-	// However, we CAN optimize the pointers slice reuse.
+	// Result slice grows as needed; we primarily optimize by reusing the pointers slice per row.
 	var result [][]any
 	var lastPK any
 
@@ -1078,12 +1074,11 @@ func scanRows(rows *sql.Rows, cols, colTypes []string) ([][]any, any, error) {
 		}
 
 		result = append(result, row)
-		// Update lastPK only if we have rows (optimization: do it outside loop if possible,
-		// but for keyset we need the last one. We can just do it once at the end)
 	}
 
 	if len(result) > 0 {
-		lastPK = result[len(result)-1][0] // Assume first column is PK for keyset
+		// lastPK is derived after the loop from the last row (first column assumed to be PK)
+		lastPK = result[len(result)-1][0]
 	}
 
 	return result, lastPK, rows.Err()
