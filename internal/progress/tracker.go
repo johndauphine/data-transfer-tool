@@ -81,6 +81,7 @@ func (t *Tracker) reportLoop(interval time.Duration) {
 func (t *Tracker) emitProgress() {
 	t.reporterMu.Lock()
 	reporter := t.reporter
+	phase := t.phase
 	t.reporterMu.Unlock()
 
 	if reporter == nil {
@@ -108,7 +109,7 @@ func (t *Tracker) emitProgress() {
 	}
 
 	update := ProgressUpdate{
-		Phase:           t.phase,
+		Phase:           phase,
 		TablesComplete:  int(t.tablesComplete.Load()),
 		TablesTotal:     t.tablesTotal,
 		TablesRunning:   tablesRunning,
@@ -125,7 +126,9 @@ func (t *Tracker) emitProgress() {
 
 // SetPhase updates the current phase and emits an immediate progress update
 func (t *Tracker) SetPhase(phase string) {
+	t.reporterMu.Lock()
 	t.phase = phase
+	t.reporterMu.Unlock()
 	t.emitProgressImmediate()
 }
 
@@ -133,15 +136,10 @@ func (t *Tracker) SetPhase(phase string) {
 func (t *Tracker) emitProgressImmediate() {
 	t.reporterMu.Lock()
 	reporter := t.reporter
+	phase := t.phase
 	t.reporterMu.Unlock()
 
 	if reporter == nil {
-		return
-	}
-
-	jsonReporter, ok := reporter.(*JSONReporter)
-	if !ok {
-		t.emitProgress()
 		return
 	}
 
@@ -166,7 +164,7 @@ func (t *Tracker) emitProgressImmediate() {
 	}
 
 	update := ProgressUpdate{
-		Phase:           t.phase,
+		Phase:           phase,
 		TablesComplete:  int(t.tablesComplete.Load()),
 		TablesTotal:     t.tablesTotal,
 		TablesRunning:   tablesRunning,
@@ -178,7 +176,7 @@ func (t *Tracker) emitProgressImmediate() {
 		ErrorCount:      int(t.tablesFailed.Load()),
 	}
 
-	jsonReporter.ReportImmediate(update)
+	reporter.ReportImmediate(update)
 }
 
 // SetTablesTotal sets the total number of tables to transfer
@@ -191,7 +189,11 @@ func (t *Tracker) SetTotal(total int64) {
 	t.total = total
 
 	// Only create progress bar if not in JSON mode
-	if !t.jsonMode {
+	t.reporterMu.Lock()
+	jsonMode := t.jsonMode
+	t.reporterMu.Unlock()
+
+	if !jsonMode {
 		t.bar = progressbar.NewOptions64(
 			total,
 			progressbar.OptionSetDescription("Transferring"),
@@ -295,10 +297,13 @@ func (t *Tracker) Finish() {
 	rowsPerSec := float64(t.current.Load()) / elapsed.Seconds()
 
 	// Emit final progress update
+	t.reporterMu.Lock()
 	t.phase = "completed"
+	jsonMode := t.jsonMode
+	t.reporterMu.Unlock()
 	t.emitProgressImmediate()
 
-	if !t.jsonMode {
+	if !jsonMode {
 		fmt.Println()
 	}
 	logging.Info("Transfer complete: %d rows in %s (%.0f rows/sec)",

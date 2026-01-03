@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 )
 
 // ProgressUpdate represents a JSON progress update for automation/Airflow.
@@ -26,8 +28,10 @@ type ProgressUpdate struct {
 
 // Reporter defines the interface for progress reporting.
 type Reporter interface {
-	// Report emits a progress update
+	// Report emits a progress update (may be throttled)
 	Report(update ProgressUpdate)
+	// ReportImmediate emits a progress update immediately, bypassing throttling
+	ReportImmediate(update ProgressUpdate)
 	// Close cleans up any resources
 	Close()
 }
@@ -77,6 +81,7 @@ func (r *JSONReporter) Report(update ProgressUpdate) {
 
 	data, err := json.Marshal(update)
 	if err != nil {
+		logging.Warn("Failed to marshal progress update: %v", err)
 		return
 	}
 
@@ -99,6 +104,7 @@ func (r *JSONReporter) ReportImmediate(update ProgressUpdate) {
 
 	data, err := json.Marshal(update)
 	if err != nil {
+		logging.Warn("Failed to marshal progress update: %v", err)
 		return
 	}
 
@@ -118,6 +124,9 @@ type NullReporter struct{}
 
 // Report does nothing.
 func (r *NullReporter) Report(update ProgressUpdate) {}
+
+// ReportImmediate does nothing.
+func (r *NullReporter) ReportImmediate(update ProgressUpdate) {}
 
 // Close does nothing.
 func (r *NullReporter) Close() {}
