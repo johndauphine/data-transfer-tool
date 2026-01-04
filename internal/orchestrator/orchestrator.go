@@ -2106,6 +2106,8 @@ func (o *Orchestrator) GetStatusResult() (*StatusResult, error) {
 }
 
 // HealthCheck tests connectivity to source and target databases.
+// Runs source and target checks in parallel with independent timeouts to prevent
+// one slow connection from causing the other to fail with "context deadline exceeded".
 func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, error) {
 	result := &HealthCheckResult{
 		Timestamp:    time.Now().Format(time.RFC3339),
@@ -2113,30 +2115,54 @@ func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, err
 		TargetDBType: o.targetPool.DBType(),
 	}
 
-	// Test source connection
-	sourceStart := time.Now()
-	if db := o.sourcePool.DB(); db != nil {
-		if err := db.PingContext(ctx); err != nil {
-			result.SourceError = err.Error()
-		} else {
-			result.SourceConnected = true
-			// Get table count
-			tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
-			if err == nil {
-				result.SourceTableCount = len(tables)
+	// Use a per-check timeout of 30 seconds.
+	const checkTimeout = 30 * time.Second
+
+	// Run source and target checks in parallel to:
+	// 1. Give each check its own 30-second budget
+	// 2. Preserve context cancellation (SIGINT, etc.)
+	// 3. Complete in max(source, target) time instead of source + target
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Source check goroutine
+	go func() {
+		defer wg.Done()
+		sourceStart := time.Now()
+		sourceCtx, sourceCancel := context.WithTimeout(ctx, checkTimeout)
+		defer sourceCancel()
+
+		if db := o.sourcePool.DB(); db != nil {
+			if err := db.PingContext(sourceCtx); err != nil {
+				result.SourceError = err.Error()
+			} else {
+				result.SourceConnected = true
+				// Get table count
+				tables, err := o.sourcePool.ExtractSchema(sourceCtx, o.config.Source.Schema)
+				if err == nil {
+					result.SourceTableCount = len(tables)
+				}
 			}
 		}
-	}
-	result.SourceLatencyMs = time.Since(sourceStart).Milliseconds()
+		result.SourceLatencyMs = time.Since(sourceStart).Milliseconds()
+	}()
 
-	// Test target connection
-	targetStart := time.Now()
-	if err := o.targetPool.Ping(ctx); err != nil {
-		result.TargetError = err.Error()
-	} else {
-		result.TargetConnected = true
-	}
-	result.TargetLatencyMs = time.Since(targetStart).Milliseconds()
+	// Target check goroutine
+	go func() {
+		defer wg.Done()
+		targetStart := time.Now()
+		targetCtx, targetCancel := context.WithTimeout(ctx, checkTimeout)
+		defer targetCancel()
+
+		if err := o.targetPool.Ping(targetCtx); err != nil {
+			result.TargetError = err.Error()
+		} else {
+			result.TargetConnected = true
+		}
+		result.TargetLatencyMs = time.Since(targetStart).Milliseconds()
+	}()
+
+	wg.Wait()
 
 	result.Healthy = result.SourceConnected && result.TargetConnected
 	return result, nil
