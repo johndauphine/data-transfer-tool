@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 // EstimateRowSizeFromStats queries SQL Server system tables to get actual average row size.
@@ -36,12 +37,22 @@ func EstimateRowSizeFromStats(ctx context.Context, db *sql.DB, schema, tableName
 }
 
 // EstimateRowSizeFromStatsPostgres queries PostgreSQL system tables for average row size.
+// Uses pg_class.relpages (cached statistic) instead of pg_total_relation_size()
+// which performs a blocking filesystem scan that can hang indefinitely.
 func EstimateRowSizeFromStatsPostgres(ctx context.Context, db *sql.DB, schema, tableName string) int64 {
-	// Query pg_stat_user_tables for actual tuple statistics
+	// Use a short timeout to prevent hanging on slow queries
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// Use relpages * 8192 (page size) for total size estimate.
+	// This uses cached statistics from pg_class instead of pg_total_relation_size()
+	// which scans the filesystem and can hang on large tables or slow I/O.
+	// Note: GREATEST(reltuples, 1) is intentional - reltuples is a float that can be
+	// fractional (e.g., 0.5) for small tables with stale stats, so we ensure min divisor of 1.
 	query := `
 		SELECT
-			CASE WHEN c.reltuples > 0
-				THEN (pg_total_relation_size(c.oid) / GREATEST(c.reltuples, 1))::bigint
+			CASE WHEN c.reltuples > 0 AND c.relpages > 0
+				THEN ((c.relpages::bigint * 8192) / GREATEST(c.reltuples, 1))::bigint
 				ELSE 500
 			END as avg_row_size
 		FROM pg_class c
@@ -50,7 +61,7 @@ func EstimateRowSizeFromStatsPostgres(ctx context.Context, db *sql.DB, schema, t
 	`
 
 	var avgSize sql.NullInt64
-	err := db.QueryRowContext(ctx, query, tableName, schema).Scan(&avgSize)
+	err := db.QueryRowContext(queryCtx, query, tableName, schema).Scan(&avgSize)
 	if err != nil || !avgSize.Valid || avgSize.Int64 == 0 {
 		return 500 // Default fallback
 	}
