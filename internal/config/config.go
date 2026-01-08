@@ -183,7 +183,7 @@ type MigrationConfig struct {
 	IncludeTables          []string `yaml:"include_tables"` // Only migrate these tables (glob patterns)
 	ExcludeTables          []string `yaml:"exclude_tables"` // Skip these tables (glob patterns)
 	DataDir                string   `yaml:"data_dir"`
-	TargetMode             string   `yaml:"target_mode"`              // "drop_recreate" (default), "truncate", or "upsert"
+	TargetMode             string   `yaml:"target_mode"`              // "drop_recreate" (default) or "upsert"
 	StrictConsistency      bool     `yaml:"strict_consistency"`       // Use table locks instead of NOLOCK
 	CreateIndexes          bool     `yaml:"create_indexes"`           // Create non-PK indexes
 	CreateForeignKeys      bool     `yaml:"create_foreign_keys"`      // Create foreign key constraints
@@ -635,8 +635,8 @@ func (c *Config) validate() error {
 	}
 
 	// Validate migration settings
-	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "truncate" && c.Migration.TargetMode != "upsert" {
-		return fmt.Errorf("migration.target_mode must be 'drop_recreate', 'truncate', or 'upsert'")
+	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "upsert" {
+		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
 	}
 	return nil
 }

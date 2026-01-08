@@ -70,7 +70,6 @@ examples/                   # Example configuration files
 
 ### Target Modes
 - **drop_recreate** (default): Drop and recreate target tables
-- **truncate**: Truncate existing tables, create if missing
 - **upsert**: Incremental sync - INSERT new rows, UPDATE changed rows, preserve target-only rows
 
 ### Pagination Strategies
@@ -139,7 +138,7 @@ Key fields:
 - `profile.name`: Name for profile storage
 - `profile.description`: Description for profile
 - `migration.data_dir`: Directory for state database (auto-created)
-- `migration.target_mode`: `drop_recreate` (default), `truncate`, or `upsert`
+- `migration.target_mode`: `drop_recreate` (default) or `upsert`
 
 ### Upsert Mode
 Incremental synchronization that preserves target-only data:
@@ -189,14 +188,12 @@ See `examples/config-upsert.yaml` for a complete example.
 | Mode | Time | Throughput | Notes |
 |------|------|------------|-------|
 | drop_recreate | ~47s | ~410K rows/sec | Fresh table creation |
-| truncate | ~47s | ~410K rows/sec | Truncate and reload |
 | upsert | ~56s | ~345K rows/sec | IS DISTINCT FROM change detection |
 
 ### Same-Engine Migrations (MSSQL → MSSQL)
 | Mode | Time | Throughput | Notes |
 |------|------|------------|-------|
 | drop_recreate | ~2m7s | ~152K rows/sec | Fresh table creation |
-| truncate | ~1m50s | ~176K rows/sec | Truncate and reload |
 | upsert | ~4m18s | ~75K rows/sec | IDENTITY_INSERT + staging table |
 
 **Same-engine notes**:
@@ -265,7 +262,7 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 4. Added IDENTITY_INSERT handling for MSSQL→MSSQL upsert mode
 5. Fixed SQL injection vulnerability in identity column detection (parameterized query)
 6. Added unit tests for DDL generation with all migration directions
-7. Tested all modes (drop_recreate, truncate, upsert) with SO2010 dataset
+7. Tested all modes (drop_recreate, upsert) with SO2010 dataset
 8. Released v1.16.0 with same-engine migration support
 9. Updated README with new feature documentation and download URLs
 

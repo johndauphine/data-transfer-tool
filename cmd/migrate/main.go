@@ -951,7 +951,7 @@ func runCLIWizard(advanced bool) (*config.Config, error) {
 	cfg := &config.Config{}
 
 	dbTypes := []string{"mssql", "postgres"}
-	targetModes := []string{"drop_recreate", "truncate", "upsert"}
+	targetModes := []string{"drop_recreate", "upsert"}
 
 	fmt.Println("\n=== Source Database ===")
 	cfg.Source.Type = promptChoice("Database type (mssql/postgres)", dbTypes, "mssql")
@@ -980,7 +980,7 @@ func runCLIWizard(advanced bool) (*config.Config, error) {
 	cfg.Target.Schema = prompt("Schema", "public")
 
 	fmt.Println("\n=== Migration Settings ===")
-	cfg.Migration.TargetMode = promptChoice("Target mode (drop_recreate/truncate/upsert)", targetModes, "drop_recreate")
+	cfg.Migration.TargetMode = promptChoice("Target mode (drop_recreate/upsert)", targetModes, "drop_recreate")
 	cfg.Migration.CreateIndexes = promptBool("Create indexes", false)
 	cfg.Migration.CreateForeignKeys = promptBool("Create foreign keys", false)
 

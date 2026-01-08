@@ -47,9 +47,9 @@ migration:
   # Directory for state database and logs
   data_dir: ~/.mssql-pg-migrate
 
-  # Target table handling: "drop_recreate" (default) or "truncate"
+  # Target table handling: "drop_recreate" (default) or "upsert"
   # - drop_recreate: Drop and recreate tables (ensures schema changes are applied)
-  # - truncate: Truncate existing tables (faster if schema hasn't changed)
+  # - upsert: Incremental sync (INSERT new rows, UPDATE changed rows, preserve target-only rows)
   target_mode: drop_recreate
 
   # Schema object creation options

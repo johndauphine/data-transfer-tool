@@ -254,7 +254,7 @@ CREATE TABLE transfer_progress (
 
 **Affected tables**: Tables with composite PKs or varchar PKs.
 
-**Mitigation**: Use `target_mode: drop_recreate` or `target_mode: truncate` for affected tables, or ensure tables have single-column integer PKs.
+**Mitigation**: Use `target_mode: drop_recreate` for affected tables, or ensure tables have single-column integer PKs.
 
 ### 3. Upsert Mode Considerations
 
@@ -467,7 +467,7 @@ Debug logs show:
 |-------|-------|----------|
 | "config changed since run started" | Config modified between run and resume | Use `--force-resume` or revert config |
 | "incomplete run is obsolete" | A successful run completed after the incomplete one | Start fresh with `run` instead of `resume` |
-| Duplicate rows after resume | ROW_NUMBER pagination + crash mid-chunk | Use `target_mode: truncate` and re-run |
+| Duplicate rows after resume | ROW_NUMBER pagination + crash mid-chunk | Use `target_mode: drop_recreate` and re-run |
 | Resume starts from beginning | No checkpoint saved (small table or early crash) | Expected behavior - checkpoint_frequency not reached |
 
 ## Future Improvements

@@ -340,7 +340,7 @@ target:
   # ...
 
 migration:
-  target_mode: upsert  # or drop_recreate, truncate
+  target_mode: upsert  # or drop_recreate
 ```
 
 **Use cases:**
@@ -570,7 +570,7 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `target_mode` | No | `drop_recreate` | How to handle existing tables: `drop_recreate` (drop and recreate) or `truncate` (keep structure, delete data) |
+| `target_mode` | No | `drop_recreate` | How to handle existing tables: `drop_recreate` (drop and recreate) or `upsert` (incremental sync) |
 | `data_dir` | No | `~/.mssql-pg-migrate` | Directory for state database and temporary files |
 
 **Schema Object Creation:**

@@ -449,70 +449,6 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			}
 			// Do NOT truncate - upsert mode preserves existing data
 		}
-	} else if o.config.Migration.TargetMode == "truncate" {
-		logging.Info("Preparing target tables (truncate mode)...")
-		// First check which tables exist vs need to be created
-		var tablesToTruncate []source.Table
-		var tablesToCreate []source.Table
-		for _, t := range tables {
-			exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
-			if err != nil {
-				o.state.CompleteRun(runID, "failed", err.Error())
-				o.notifyFailure(runID, err, time.Since(startTime))
-				return fmt.Errorf("checking if table %s exists: %w", t.Name, err)
-			}
-			if exists {
-				tablesToTruncate = append(tablesToTruncate, t)
-			} else {
-				tablesToCreate = append(tablesToCreate, t)
-			}
-		}
-
-		// Parallel truncation
-		if len(tablesToTruncate) > 0 {
-			logging.Debug("  Truncating %d existing tables in parallel...", len(tablesToTruncate))
-			var truncWg sync.WaitGroup
-			truncErrs := make(chan error, len(tablesToTruncate))
-			for _, t := range tablesToTruncate {
-				truncWg.Add(1)
-				go func(table source.Table) {
-					defer truncWg.Done()
-					if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, table.Name); err != nil {
-						truncErrs <- fmt.Errorf("truncating table %s: %w", table.Name, err)
-					}
-				}(t)
-			}
-			truncWg.Wait()
-			close(truncErrs)
-			if err := <-truncErrs; err != nil {
-				o.state.CompleteRun(runID, "failed", err.Error())
-				o.notifyFailure(runID, err, time.Since(startTime))
-				return err
-			}
-		}
-
-		// Parallel table creation for non-existing tables
-		if len(tablesToCreate) > 0 {
-			logging.Debug("  Creating %d new tables in parallel...", len(tablesToCreate))
-			var createWg sync.WaitGroup
-			createErrs := make(chan error, len(tablesToCreate))
-			for _, t := range tablesToCreate {
-				createWg.Add(1)
-				go func(table source.Table) {
-					defer createWg.Done()
-					if err := o.targetPool.CreateTable(ctx, &table, o.config.Target.Schema); err != nil {
-						createErrs <- fmt.Errorf("creating table %s: %w", table.FullName(), err)
-					}
-				}(t)
-			}
-			createWg.Wait()
-			close(createErrs)
-			if err := <-createErrs; err != nil {
-				o.state.CompleteRun(runID, "failed", err.Error())
-				o.notifyFailure(runID, err, time.Since(startTime))
-				return err
-			}
-		}
 	} else {
 		// Default: drop_recreate
 		logging.Info("Creating target tables (drop and recreate)...")
@@ -1193,6 +1129,13 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 }
 
 func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) error {
+	// In upsert mode, tables already exist with PKs, sequences, indexes, FKs, and constraints.
+	// Nothing to finalize - return early.
+	if o.config.Migration.TargetMode == "upsert" {
+		logging.Debug("  Skipping finalize (upsert mode - tables already have constraints)")
+		return nil
+	}
+
 	// Phase 1: Reset sequences (parallel - no dependencies between tables)
 	logging.Debug("  Resetting sequences...")
 	var seqWg sync.WaitGroup
