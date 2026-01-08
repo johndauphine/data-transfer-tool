@@ -144,6 +144,8 @@ ON CONFLICT(task_id) DO UPDATE SET
 - `rows_done`: Approximate rows transferred
 - `partition_id`: For partitioned tables, which partition this progress belongs to
 
+Checkpoint saves occur after a chunk write completes. With parallel readers, the checkpoint uses a conservative safe point (the lowest fully written range) to avoid skipping data after a crash.
+
 ### 4. Resume Flow
 
 On resume (`/resume` command or `--resume` flag):
