@@ -474,7 +474,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			return err
 		}
 
-		// Phase 2: Create all tables in parallel (no FKs yet, just tables)
+		// Phase 2: Create all tables with PKs in parallel
 		logging.Debug("  Creating %d tables in parallel...", len(tables))
 		var createWg sync.WaitGroup
 		createErrs := make(chan error, len(tables))
@@ -484,6 +484,11 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 				defer createWg.Done()
 				if err := o.targetPool.CreateTable(ctx, &table, o.config.Target.Schema); err != nil {
 					createErrs <- fmt.Errorf("creating table %s: %w", table.FullName(), err)
+					return
+				}
+				// Create PK immediately after table (PKs are part of table structure)
+				if err := o.targetPool.CreatePrimaryKey(ctx, &table, o.config.Target.Schema); err != nil {
+					createErrs <- fmt.Errorf("creating PK for %s: %w", table.FullName(), err)
 				}
 			}(t)
 		}
@@ -1150,21 +1155,9 @@ func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) erro
 	}
 	seqWg.Wait()
 
-	// Phase 2: Create primary keys (parallel - no dependencies between tables)
-	logging.Debug("  Creating primary keys...")
-	var pkWg sync.WaitGroup
-	for _, t := range tables {
-		pkWg.Add(1)
-		go func(table source.Table) {
-			defer pkWg.Done()
-			if err := o.targetPool.CreatePrimaryKey(ctx, &table, o.config.Target.Schema); err != nil {
-				logging.Warn("Warning: creating PK for %s: %v", table.Name, err)
-			}
-		}(t)
-	}
-	pkWg.Wait()
+	// Note: PKs are created with tables (not deferred to finalize)
 
-	// Phase 3: Create indexes (if enabled) - parallel per table
+	// Phase 2: Create indexes (if enabled) - parallel per table
 	if o.config.Migration.CreateIndexes {
 		// Count total indexes for logging
 		totalIndexes := 0
@@ -1190,7 +1183,7 @@ func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) erro
 		idxWg.Wait()
 	}
 
-	// Phase 4: Create foreign keys (if enabled) - parallel per table
+	// Phase 3: Create foreign keys (if enabled) - parallel per table
 	// Note: FKs can be created in parallel since all tables and PKs exist at this point
 	if o.config.Migration.CreateForeignKeys {
 		totalFKs := 0
@@ -1216,7 +1209,7 @@ func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) erro
 		fkWg.Wait()
 	}
 
-	// Phase 5: Create check constraints (if enabled) - parallel per table
+	// Phase 4: Create check constraints (if enabled) - parallel per table
 	if o.config.Migration.CreateCheckConstraints {
 		totalChecks := 0
 		for _, t := range tables {
