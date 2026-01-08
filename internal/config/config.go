@@ -197,9 +197,9 @@ type MigrationConfig struct {
 	UpsertMergeChunkSize   int      `yaml:"upsert_merge_chunk_size"`  // Chunk size for upsert UPDATE+INSERT (default=5000, auto-tuned)
 	MaxMemoryMB            int64    `yaml:"max_memory_mb"`            // Max memory to use (default=70% of available, hard cap at 70%)
 	// Restartability settings
-	CheckpointFrequency   int `yaml:"checkpoint_frequency"`    // Save progress every N chunks (default=10)
-	MaxRetries            int `yaml:"max_retries"`             // Retry failed tables N times (default=3)
-	HistoryRetentionDays  int `yaml:"history_retention_days"`  // Keep run history for N days (default=30)
+	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (default=10)
+	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times (default=3)
+	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 }
 
 // LoadOptions controls configuration loading behavior.

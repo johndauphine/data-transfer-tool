@@ -2,7 +2,7 @@ source:
   type: postgres
   host: localhost
   port: 5433
-  database: stackoverflow
+  database: so2010
   user: postgres
   password: "PostgresPassword123"
   schema: public
@@ -12,7 +12,7 @@ target:
   type: mssql
   host: localhost
   port: 1433
-  database: StackOverflow2010_bench
+  database: StackOverflow2010
   user: sa
   password: "YourStrong@Passw0rd"
   schema: dbo

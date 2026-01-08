@@ -13,7 +13,7 @@ target:
   type: postgres
   host: localhost
   port: 5433
-  database: stackoverflow
+  database: so2010
   user: postgres
   password: "PostgresPassword123"
   schema: public

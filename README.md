@@ -309,10 +309,12 @@ sensor = PythonSensor(
 
 ## Performance
 
-- **575,000 rows/sec** MSSQL → PostgreSQL (auto-tuned, 19M rows in 34s)
-- **419,000 rows/sec** PostgreSQL → MSSQL (8 writers, 19M rows in 46s)
+- **79K-472K rows/sec** depending on direction and mode
+- **PG → PG**: 472K rows/sec (fastest, COPY both ends)
+- **MSSQL → PG**: 323K rows/sec (COPY protocol)
+- **PG → MSSQL**: 196K rows/sec (TDS bulk copy)
 - **Auto-tuning** based on CPU cores and available RAM
-- **3-4x faster** than equivalent Python/Airflow solutions
+- **2-6x faster** than equivalent Python/Airflow solutions
 
 ## Supported Directions
 
@@ -1105,25 +1107,28 @@ Serial/identity columns are mapped to `IDENTITY(1,1)` with proper seed reset.
 
 ## Benchmarks
 
-Tested on StackOverflow database dumps:
-- **Environment**: Windows laptop with WSL2 (24GB RAM allocated), 16 cores
-- **Databases**: SQL Server and PostgreSQL running in Docker containers (same host)
-- **Dataset**: StackOverflow 2010 (19.3M rows) and 2013 (106.5M rows)
+### Test Environment
+- **Hardware**: MacBook Pro M3 Max, 36GB RAM, 14 cores
+- **Dataset**: Stack Overflow 2010 (19.3M rows, 9 tables)
+- **Databases**: PostgreSQL 15 and SQL Server 2022 (both in Docker)
 
-### MSSQL → PostgreSQL
-| Dataset | Rows | Duration | Throughput |
-|---------|------|----------|------------|
-| SO2010 | 19.3M | 34s | **575,000 rows/sec** |
-| SO2013 | 106.5M | ~3m | ~590,000 rows/sec |
+### Complete Benchmark Matrix
 
-### PostgreSQL → MSSQL
-| Dataset | Rows | Duration | Throughput | Config |
-|---------|------|----------|------------|--------|
-| SO2010 | 19.3M | 83s | 234,000 rows/sec | 2 writers |
-| SO2010 | 19.3M | 54s | 355,000 rows/sec | 4 writers |
-| SO2010 | 19.3M | 46s | **419,000 rows/sec** | 8 writers |
+All migration directions with both target modes:
 
-PostgreSQL → MSSQL is ~1.4x slower with optimized settings (8 writers) due to TDS bulk copy protocol overhead vs PostgreSQL COPY.
+| Direction | drop_recreate | upsert |
+|-----------|---------------|--------|
+| **MSSQL → PG** | 323K rows/sec | 296K rows/sec |
+| **PG → MSSQL** | 196K rows/sec | 148K rows/sec |
+| **MSSQL → MSSQL** | 183K rows/sec | 79K rows/sec |
+| **PG → PG** | 472K rows/sec | 337K rows/sec |
+
+### Key Observations
+
+- **PG → PG** is fastest due to COPY protocol on both ends
+- **MSSQL → PG** is faster than PG → MSSQL (PG COPY more efficient than MSSQL bulk insert)
+- **Upsert overhead**: 8-57% slower than drop_recreate depending on direction
+- **MSSQL → MSSQL upsert** is slowest due to IDENTITY_INSERT + MERGE complexity
 
 Performance varies based on:
 - Network latency between source and target
@@ -1135,7 +1140,7 @@ Performance varies based on:
 
 | Feature | mssql-pg-migrate (Go) | Airflow DAG (Python) |
 |---------|----------------------|---------------------|
-| Throughput | 575k rows/sec | ~50-80k rows/sec |
+| Throughput | 79-472K rows/sec | ~50-80k rows/sec |
 | Memory usage | ~50MB | ~200-400MB |
 | Resume granularity | Chunk-level | Partition-level |
 | Dependencies | None (single binary) | Python, Airflow, etc. |

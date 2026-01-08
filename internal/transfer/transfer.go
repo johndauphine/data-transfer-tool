@@ -1426,29 +1426,13 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 	}
 }
 
-// writeChunkUpsert writes a chunk of data using upsert (INSERT ON CONFLICT / MERGE).
-//
-// Deprecated: Use writeChunkUpsertWithWriter for better performance.
-func writeChunkUpsert(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, pkCols []string, rows [][]any) error {
-	return tgtPool.UpsertChunk(ctx, schema, table, cols, pkCols, rows)
-}
-
 // writeChunkUpsertWithWriter writes a chunk using high-performance staging table approach.
 // This uses per-writer staging tables for isolation and better parallelism:
 // - PostgreSQL: TEMP table + COPY + INSERT...ON CONFLICT
 // - MSSQL: #temp table + bulk insert + MERGE WITH (TABLOCK)
 func writeChunkUpsertWithWriter(ctx context.Context, tgtPool pool.TargetPool, schema, table string,
 	cols []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
-
-	// Try to use the new high-performance method if available
-	if wp, ok := tgtPool.(interface {
-		UpsertChunkWithWriter(context.Context, string, string, []string, []string, [][]any, int, *int) error
-	}); ok {
-		return wp.UpsertChunkWithWriter(ctx, schema, table, cols, pkCols, rows, writerID, partitionID)
-	}
-
-	// Fallback to legacy method (no writer isolation)
-	return tgtPool.UpsertChunk(ctx, schema, table, cols, pkCols, rows)
+	return tgtPool.UpsertChunkWithWriter(ctx, schema, table, cols, pkCols, rows, writerID, partitionID)
 }
 
 // ValidateBinaryData ensures binary data is properly formatted

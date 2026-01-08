@@ -4,7 +4,7 @@ This file provides context for AI assistants working on this project. Read this 
 
 ## Project Overview
 
-**mssql-pg-migrate** is a high-performance CLI tool for bidirectional database migration between Microsoft SQL Server and PostgreSQL. Written in Go, it achieves 575K+ rows/sec for MSSQL→PG and 419K+ rows/sec for PG→MSSQL.
+**mssql-pg-migrate** is a high-performance CLI tool for bidirectional database migration between Microsoft SQL Server and PostgreSQL. Written in Go, it supports all 4 migration directions (MSSQL↔PG, PG↔PG, MSSQL↔MSSQL) with throughput ranging from 79K-472K rows/sec depending on direction and mode.
 
 It features a modern **Terminal User Interface (TUI)** powered by Bubble Tea, offering an interactive wizard, real-time monitoring, encrypted profile storage, and easy configuration management.
 
@@ -157,49 +157,39 @@ See `examples/config-upsert.yaml` for a complete example.
 - **Hardware**: MacBook Pro M3 Max, 36GB RAM, 14 cores
 - **Dataset**: Stack Overflow 2010 (19.3M rows, 9 tables)
 - **Databases**: PostgreSQL 15 and SQL Server 2022 (both in Docker)
+- **Last tested**: January 2026
 
-### Bulk Copy (drop_recreate mode)
-| Direction | Throughput | Notes |
-|-----------|------------|-------|
-| MSSQL → PostgreSQL | 575K+ rows/sec | COPY protocol |
-| PostgreSQL → MSSQL | 419K+ rows/sec | TDS bulk copy |
+### Complete Benchmark Matrix
 
-### Upsert Mode (PG → MSSQL)
-| Scenario | Time | Throughput | Notes |
-|----------|------|------------|-------|
-| Initial load (empty target) | 6m26s | 50K rows/sec | All inserts via staging table |
-| Re-run (no changes) | 3m49s | 84K rows/sec | Change detection skips updates |
-| Re-run (1 row modified) | 3m40s | 88K rows/sec | Only modified row updated |
+All permutations of source, target, and mode (19.3M rows each):
 
-### Upsert Mode (MSSQL → PG)
-| Scenario | Time | Throughput | Notes |
-|----------|------|------------|-------|
-| Initial load (empty target) | 1m27s | 222K rows/sec | INSERT ON CONFLICT batches |
-| Re-run (no changes) | 1m23s | 233K rows/sec | IS DISTINCT FROM skips updates |
-| Re-run (1 row modified) | 1m59s | 163K rows/sec | Only modified row updated |
+| Direction | drop_recreate | upsert |
+|-----------|---------------|--------|
+| **MSSQL → PG** | 323K rows/sec | 296K rows/sec |
+| **PG → MSSQL** | 196K rows/sec | 148K rows/sec |
+| **MSSQL → MSSQL** | 183K rows/sec | 79K rows/sec |
+| **PG → PG** | 472K rows/sec | 337K rows/sec |
 
-**Key observations**:
-- PostgreSQL upsert is ~4x faster than SQL Server upsert due to efficient `INSERT...ON CONFLICT`
-- MSSQL→PG upsert is only ~2.5x slower than bulk COPY (vs 8x for PG→MSSQL)
-- `IS DISTINCT FROM` provides efficient NULL-safe change detection
-- SQL Server staging table + UPDATE/INSERT pattern has higher overhead
+### Key Observations
 
-### Same-Engine Migrations (PG → PG)
-| Mode | Time | Throughput | Notes |
-|------|------|------------|-------|
-| drop_recreate | ~47s | ~410K rows/sec | Fresh table creation |
-| upsert | ~56s | ~345K rows/sec | IS DISTINCT FROM change detection |
+**Cross-engine migrations:**
+- MSSQL → PG is faster than PG → MSSQL (PG COPY protocol is more efficient than MSSQL bulk insert)
+- PostgreSQL's `INSERT...ON CONFLICT` with `IS DISTINCT FROM` provides efficient upsert
+- MSSQL upsert uses staging tables + MERGE which has higher overhead
 
-### Same-Engine Migrations (MSSQL → MSSQL)
-| Mode | Time | Throughput | Notes |
-|------|------|------------|-------|
-| drop_recreate | ~2m7s | ~152K rows/sec | Fresh table creation |
-| upsert | ~4m18s | ~75K rows/sec | IDENTITY_INSERT + staging table |
-
-**Same-engine notes**:
-- Type normalization preserves canonical types (e.g., `int4` → `integer` for PG)
-- MSSQL→MSSQL upsert requires IDENTITY_INSERT for identity columns
+**Same-engine migrations:**
+- PG → PG is fastest overall due to COPY protocol on both ends
+- MSSQL → MSSQL upsert is slowest due to IDENTITY_INSERT handling and MERGE complexity
 - Useful for database cloning, environment sync, or disaster recovery
+
+**Upsert mode overhead:**
+- PG targets: ~8-29% slower than drop_recreate
+- MSSQL targets: ~24-57% slower than drop_recreate
+- MSSQL → MSSQL upsert has highest overhead due to staging table + MERGE pattern
+
+**Column name case handling:**
+- PG → MSSQL upsert correctly maps lowercase PG columns to mixed-case MSSQL columns
+- Uses case-insensitive column name mapping via staging table introspection
 
 ## Building
 

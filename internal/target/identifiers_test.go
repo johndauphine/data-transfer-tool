@@ -242,7 +242,7 @@ type mockTable struct {
 	columns []string
 }
 
-func (m *mockTable) GetName() string         { return m.name }
+func (m *mockTable) GetName() string          { return m.name }
 func (m *mockTable) GetColumnNames() []string { return m.columns }
 
 func TestCollectPGIdentifierChanges(t *testing.T) {
@@ -301,9 +301,9 @@ func TestCollectPGIdentifierChanges(t *testing.T) {
 		{
 			name: "mixed changes",
 			tables: []TableInfo{
-				&mockTable{name: "Users", columns: []string{"UserID", "name"}},     // table + 1 column
-				&mockTable{name: "orders", columns: []string{"id", "Order-Date"}},  // 1 column only
-				&mockTable{name: "products", columns: []string{"id", "name"}},       // no changes
+				&mockTable{name: "Users", columns: []string{"UserID", "name"}},    // table + 1 column
+				&mockTable{name: "orders", columns: []string{"id", "Order-Date"}}, // 1 column only
+				&mockTable{name: "products", columns: []string{"id", "name"}},     // no changes
 			},
 			wantTotalTableChanges:  1,
 			wantTotalColumnChanges: 2,

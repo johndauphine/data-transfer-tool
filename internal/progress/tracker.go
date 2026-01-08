@@ -270,12 +270,6 @@ func (t *Tracker) TableFailed() {
 	t.tablesFailed.Add(1)
 }
 
-// SetTable updates the progress bar description with the current table name
-// Deprecated: Use StartTable/EndTable for accurate multi-table tracking
-func (t *Tracker) SetTable(tableName string) {
-	t.StartTable(tableName)
-}
-
 // Current returns the current count
 func (t *Tracker) Current() int64 {
 	return t.current.Load()
