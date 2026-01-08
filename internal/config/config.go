@@ -196,6 +196,10 @@ type MigrationConfig struct {
 	MSSQLRowsPerBatch      int      `yaml:"mssql_rows_per_batch"`     // MSSQL bulk copy hint (default=chunk_size)
 	UpsertMergeChunkSize   int      `yaml:"upsert_merge_chunk_size"`  // Chunk size for upsert UPDATE+INSERT (default=5000, auto-tuned)
 	MaxMemoryMB            int64    `yaml:"max_memory_mb"`            // Max memory to use (default=70% of available, hard cap at 70%)
+	// Restartability settings
+	CheckpointFrequency   int `yaml:"checkpoint_frequency"`    // Save progress every N chunks (default=10)
+	MaxRetries            int `yaml:"max_retries"`             // Retry failed tables N times (default=3)
+	HistoryRetentionDays  int `yaml:"history_retention_days"`  // Keep run history for N days (default=30)
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -537,6 +541,17 @@ func (c *Config) applyDefaults() {
 			// Not in upsert mode - set a sensible default anyway
 			c.Migration.UpsertMergeChunkSize = 10000
 		}
+	}
+
+	// Restartability defaults
+	if c.Migration.CheckpointFrequency == 0 {
+		c.Migration.CheckpointFrequency = 10 // Save progress every 10 chunks
+	}
+	if c.Migration.MaxRetries == 0 {
+		c.Migration.MaxRetries = 3 // Retry failed tables 3 times
+	}
+	if c.Migration.HistoryRetentionDays == 0 {
+		c.Migration.HistoryRetentionDays = 30 // Keep run history for 30 days
 	}
 }
 
@@ -960,6 +975,12 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  SampleValidation: %v\n", c.Migration.SampleValidation))
 	b.WriteString(fmt.Sprintf("  SampleSize: %s\n", formatAutoValue(c.Migration.SampleSize, ac.OriginalSampleSize, "default 100")))
 	b.WriteString(fmt.Sprintf("  DataDir: %s\n", c.Migration.DataDir))
+
+	// Restartability Settings
+	b.WriteString("\nRestartability:\n")
+	b.WriteString(fmt.Sprintf("  CheckpointFrequency: %d chunks\n", c.Migration.CheckpointFrequency))
+	b.WriteString(fmt.Sprintf("  MaxRetries: %d\n", c.Migration.MaxRetries))
+	b.WriteString(fmt.Sprintf("  HistoryRetentionDays: %d\n", c.Migration.HistoryRetentionDays))
 
 	// Table Filters
 	b.WriteString("\nTable Filters:\n")

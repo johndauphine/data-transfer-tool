@@ -754,6 +754,23 @@ func executeKeysetPagination(
 		}
 
 		chunkCount++
+
+		// Chunk-level checkpointing: save progress every N chunks
+		checkpointFreq := cfg.Migration.CheckpointFrequency
+		if checkpointFreq <= 0 {
+			checkpointFreq = 10 // Default fallback
+		}
+		if job.Saver != nil && job.TaskID > 0 && chunkCount%checkpointFreq == 0 && lastPK != nil {
+			var partID *int
+			if job.Partition != nil {
+				partID = &job.Partition.PartitionID
+			}
+			// Calculate approximate rows done (resume + written so far)
+			rowsDone := totalTransferred + atomic.LoadInt64(&totalWritten)
+			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, lastPK, rowsDone, job.Table.RowCount); err != nil {
+				logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
+			}
+		}
 	}
 
 	// Close write job channel and wait for writers to finish
@@ -1039,6 +1056,27 @@ func executeRowNumberPagination(
 		}
 
 		chunkCount++
+
+		// Chunk-level checkpointing: save progress every N chunks
+		checkpointFreq := cfg.Migration.CheckpointFrequency
+		if checkpointFreq <= 0 {
+			checkpointFreq = 10 // Default fallback
+		}
+		if job.Saver != nil && job.TaskID > 0 && chunkCount%checkpointFreq == 0 && currentRowNum > 0 {
+			var partID *int
+			var partitionRows int64
+			if job.Partition != nil {
+				partID = &job.Partition.PartitionID
+				partitionRows = job.Partition.RowCount
+			} else {
+				partitionRows = job.Table.RowCount
+			}
+			// Calculate approximate rows done (resume + written so far)
+			rowsDone := totalTransferred + atomic.LoadInt64(&totalWritten)
+			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, currentRowNum, rowsDone, partitionRows); err != nil {
+				logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
+			}
+		}
 	}
 
 	// Close write job channel and wait for writers to finish
@@ -1066,7 +1104,7 @@ func executeRowNumberPagination(
 			partitionRows = job.Table.RowCount
 		}
 		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, currentRowNum, totalTransferred, partitionRows); err != nil {
-			fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
+			logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
 		}
 	}
 

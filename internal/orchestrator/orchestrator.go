@@ -83,6 +83,35 @@ func computeConfigHash(cfg *config.Config) string {
 	return hex.EncodeToString(hash[:8])
 }
 
+// isRetryableError determines if an error is transient and worth retrying.
+// This includes connection errors, timeouts, and deadlocks.
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	retryablePatterns := []string{
+		"connection reset",
+		"connection refused",
+		"connection timed out",
+		"deadlock",
+		"lock timeout",
+		"too many connections",
+		"server is shutting down",
+		"broken pipe",
+		"unexpected eof",
+		"i/o timeout",
+		"context deadline exceeded",
+		"retry",
+	}
+	for _, pattern := range retryablePatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 // MigrationResult contains the outcome of a migration run.
 type MigrationResult struct {
 	RunID           string        `json:"run_id"`
@@ -205,12 +234,25 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		}
 	} else {
 		// Use SQLite state (default for desktop)
-		state, err = checkpoint.New(cfg.Migration.DataDir)
+		sqliteState, err := checkpoint.New(cfg.Migration.DataDir)
 		if err != nil {
 			sourcePool.Close()
 			targetPool.Close()
 			return nil, fmt.Errorf("creating state manager: %w", err)
 		}
+
+		// Cleanup old runs based on retention policy
+		retentionDays := cfg.Migration.HistoryRetentionDays
+		if retentionDays <= 0 {
+			retentionDays = 30 // Default
+		}
+		if deleted, cleanupErr := sqliteState.CleanupOldRuns(retentionDays); cleanupErr != nil {
+			logging.Warn("History cleanup failed: %v", cleanupErr)
+		} else if deleted > 0 {
+			logging.Info("Cleaned up %d old migration runs (retention: %d days)", deleted, retentionDays)
+		}
+
+		state = sqliteState
 	}
 
 	// Create notifier
@@ -993,7 +1035,35 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			// Mark task as running when worker starts processing
 			o.state.UpdateTaskStatus(j.TaskID, "running", "")
 
-			stats, err := transfer.Execute(ctx, o.sourcePool, o.targetPool, o.config, j, o.progress)
+			// Execute transfer with retry logic for transient errors
+			maxRetries := o.config.Migration.MaxRetries
+			if maxRetries <= 0 {
+				maxRetries = 3
+			}
+
+			var stats *transfer.TransferStats
+			var err error
+			for attempt := 0; attempt <= maxRetries; attempt++ {
+				if attempt > 0 {
+					// Exponential backoff: 1s, 2s, 4s, etc.
+					backoff := time.Duration(1<<(attempt-1)) * time.Second
+					logging.Warn("Retry %d/%d for %s after %v (error: %v)", attempt, maxRetries, j.Table.Name, backoff, err)
+					select {
+					case <-ctx.Done():
+						err = ctx.Err()
+						break
+					case <-time.After(backoff):
+					}
+				}
+
+				stats, err = transfer.Execute(ctx, o.sourcePool, o.targetPool, o.config, j, o.progress)
+				if err == nil {
+					break
+				}
+				if !isRetryableError(err) {
+					break // Non-retryable error, fail immediately
+				}
+			}
 
 			// Update table stats and completion tracking
 			ts := statsMap[j.Table.Name]
