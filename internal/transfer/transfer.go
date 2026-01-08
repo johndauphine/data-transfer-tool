@@ -42,11 +42,38 @@ type chunkResult struct {
 	rows      [][]any
 	lastPK    any
 	rowNum    int64 // for ROW_NUMBER pagination progress tracking
+	readerID  int
+	seq       int64
 	queryTime time.Duration
 	scanTime  time.Duration
 	readEnd   time.Time // when this chunk finished reading
 	err       error
 	done      bool // signals end of data
+}
+
+type writeJob struct {
+	rows     [][]any
+	lastPK   any
+	rowNum   int64
+	readerID int
+	seq      int64
+}
+
+type writeAck struct {
+	readerID int
+	seq      int64
+	lastPK   any
+	rowNum   int64
+}
+
+type readerCheckpointState struct {
+	lastPK    any
+	lastPKInt int64
+	maxPKInt  int64
+	maxOK     bool
+	complete  bool
+	nextSeq   int64
+	pending   map[int64]writeAck
 }
 
 // writeResult holds the result of a parallel write operation
@@ -422,7 +449,7 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 		// PostgreSQL target - sanitize identifiers
 		sanitizedPK := target.SanitizePGIdentifier(pkCol)
 		sanitizedTable := target.SanitizePGIdentifier(tableName)
-		
+
 		var deleteQuery string
 		var result pgconn.CommandTag
 		var err error
@@ -476,6 +503,28 @@ func parseResumeRowNum(lastPK any) (int64, bool) {
 		return 0, false
 	}
 	switch v := lastPK.(type) {
+	case int:
+		return int64(v), true
+	case int32:
+		return int64(v), true
+	case int64:
+		return v, true
+	case float64:
+		return int64(v), true
+	case string:
+		parsed, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func parseNumericPK(value any) (int64, bool) {
+	if value == nil {
+		return 0, false
+	}
+	switch v := value.(type) {
 	case int:
 		return int64(v), true
 	case int32:
@@ -562,16 +611,15 @@ func executeKeysetPagination(
 
 	// Split PK range for parallel readers
 	pkRanges := splitPKRange(minPKVal, maxPKVal, numReaders)
-	actualReaders := len(pkRanges)
-
 	// Start parallel reader goroutines
 	var readerWg sync.WaitGroup
-	for _, pkr := range pkRanges {
+	for readerID, pkr := range pkRanges {
 		readerWg.Add(1)
-		go func(rangeMinPK, rangeMaxPK any) {
+		go func(readerID int, rangeMinPK, rangeMaxPK any) {
 			defer readerWg.Done()
 
 			lastPK := rangeMinPK
+			seq := int64(0)
 
 			for {
 				select {
@@ -614,16 +662,19 @@ func executeKeysetPagination(
 				chunkChan <- chunkResult{
 					rows:      chunk,
 					lastPK:    lastPK,
+					readerID:  readerID,
+					seq:       seq,
 					queryTime: queryTime,
 					scanTime:  scanTime,
 					readEnd:   time.Now(),
 				}
+				seq++
 
 				if len(chunk) < chunkSize {
 					return // This reader is done
 				}
 			}
-		}(pkr.minPK, pkr.maxPK)
+		}(readerID, pkr.minPK, pkr.maxPK)
 	}
 
 	// Close chunkChan when all readers are done
@@ -632,8 +683,6 @@ func executeKeysetPagination(
 		close(chunkChan)
 	}()
 
-	_ = actualReaders // Used for logging
-
 	// Parallel writers setup
 	numWriters := cfg.Migration.WriteAheadWriters
 	if numWriters < 1 {
@@ -641,7 +690,7 @@ func executeKeysetPagination(
 	}
 
 	// Channel for dispatching write jobs to worker pool
-	writeJobChan := make(chan [][]any, bufferSize)
+	writeJobChan := make(chan writeJob, bufferSize)
 
 	// Shared state for parallel writers
 	var totalWriteTime int64 // atomic, nanoseconds
@@ -656,7 +705,7 @@ func executeKeysetPagination(
 	// Start write workers
 	useUpsert := cfg.Migration.TargetMode == "upsert"
 	pkCols := job.Table.PrimaryKey
-	
+
 	// Sanitize PK columns for upsert
 	targetPKCols := make([]string, len(pkCols))
 	for i, pk := range pkCols {
@@ -669,18 +718,34 @@ func executeKeysetPagination(
 		partitionID = &job.Partition.PartitionID
 	}
 
+	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &totalWritten, cfg.Migration.CheckpointFrequency)
+
+	var ackChan chan writeAck
+	var ackWg sync.WaitGroup
+	if checkpointCoord != nil {
+		ackChan = make(chan writeAck, bufferSize)
+		ackWg.Add(1)
+		go func() {
+			defer ackWg.Done()
+			for ack := range ackChan {
+				checkpointCoord.onAck(ack)
+			}
+		}()
+	}
+
 	for i := 0; i < numWriters; i++ {
 		writerID := i // Capture for closure
 		writerWg.Add(1)
 		go func() {
 			defer writerWg.Done()
-			for rows := range writeJobChan {
+			for job := range writeJobChan {
 				select {
 				case <-writerCtx.Done():
 					return
 				default:
 				}
 
+				rows := job.rows
 				writeStart := time.Now()
 				var err error
 				if useUpsert {
@@ -701,6 +766,14 @@ func executeKeysetPagination(
 				rowCount := int64(len(rows))
 				atomic.AddInt64(&totalWritten, rowCount)
 				prog.Add(rowCount)
+
+				if ackChan != nil {
+					ackChan <- writeAck{
+						readerID: job.readerID,
+						seq:      job.seq,
+						lastPK:   job.lastPK,
+					}
+				}
 			}
 		}()
 	}
@@ -711,13 +784,15 @@ func executeKeysetPagination(
 	var totalOverlap time.Duration
 	var lastWriteEnd time.Time
 	var lastPK any
+	var loopErr error
 
 	// Process chunks and dispatch writes
+chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
+			loopErr = result.err
 			cancelWriters()
-			close(writeJobChan)
-			return stats, result.err
+			break
 		}
 		if result.done {
 			break
@@ -737,13 +812,19 @@ func executeKeysetPagination(
 
 		// Dispatch to write pool
 		select {
-		case writeJobChan <- result.rows:
+		case writeJobChan <- writeJob{
+			rows:     result.rows,
+			lastPK:   result.lastPK,
+			readerID: result.readerID,
+			seq:      result.seq,
+		}:
 		case <-writerCtx.Done():
-			close(writeJobChan)
 			if err := writeErr.Load(); err != nil {
-				return stats, fmt.Errorf("writing chunk: %w", *err)
+				loopErr = fmt.Errorf("writing chunk: %w", *err)
+			} else {
+				loopErr = writerCtx.Err()
 			}
-			return stats, writerCtx.Err()
+			break chunkLoop
 		}
 
 		// Log overlap stats periodically
@@ -759,6 +840,14 @@ func executeKeysetPagination(
 	// Close write job channel and wait for writers to finish
 	close(writeJobChan)
 	writerWg.Wait()
+	if ackChan != nil {
+		close(ackChan)
+		ackWg.Wait()
+	}
+
+	if loopErr != nil {
+		return stats, loopErr
+	}
 
 	// Check for write errors
 	if err := writeErr.Load(); err != nil {
@@ -772,11 +861,15 @@ func executeKeysetPagination(
 
 	// Save final progress
 	if job.Saver != nil && job.TaskID > 0 && lastPK != nil {
+		finalLastPK := lastPK
+		if checkpointCoord != nil {
+			finalLastPK = checkpointCoord.finalCheckpoint(lastPK)
+		}
 		var partID *int
 		if job.Partition != nil {
 			partID = &job.Partition.PartitionID
 		}
-		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, lastPK, totalTransferred, job.Table.RowCount); err != nil {
+		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, finalLastPK, totalTransferred, job.Table.RowCount); err != nil {
 			logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
 		}
 	}
@@ -856,6 +949,7 @@ func executeRowNumberPagination(
 	go func() {
 		defer close(chunkChan)
 		rowNum := initialRowNum
+		seq := int64(0)
 
 		for rowNum < endRow {
 			select {
@@ -905,10 +999,13 @@ func executeRowNumberPagination(
 			chunkChan <- chunkResult{
 				rows:      chunk,
 				rowNum:    newRowNum,
+				readerID:  0,
+				seq:       seq,
 				queryTime: queryTime,
 				scanTime:  scanTime,
 				readEnd:   time.Now(),
 			}
+			seq++
 
 			rowNum = newRowNum
 
@@ -927,7 +1024,7 @@ func executeRowNumberPagination(
 	}
 
 	// Channel for dispatching write jobs to worker pool
-	writeJobChan := make(chan [][]any, bufferSize)
+	writeJobChan := make(chan writeJob, bufferSize)
 
 	// Shared state for parallel writers
 	var totalWriteTime int64 // atomic, nanoseconds
@@ -941,7 +1038,7 @@ func executeRowNumberPagination(
 
 	// Start write workers
 	useUpsert := cfg.Migration.TargetMode == "upsert"
-	
+
 	// Sanitize PK columns for upsert
 	targetPKCols := make([]string, len(job.Table.PrimaryKey))
 	for i, pk := range job.Table.PrimaryKey {
@@ -950,8 +1047,55 @@ func executeRowNumberPagination(
 
 	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
 	var partitionID *int
+	var partitionRows int64
 	if job.Partition != nil {
 		partitionID = &job.Partition.PartitionID
+		partitionRows = job.Partition.RowCount
+	} else {
+		partitionRows = job.Table.RowCount
+	}
+
+	checkpointFreq := cfg.Migration.CheckpointFrequency
+	if checkpointFreq <= 0 {
+		checkpointFreq = 10 // Default fallback
+	}
+
+	var ackChan chan writeAck
+	var ackWg sync.WaitGroup
+	lastCheckpointRowNum := initialRowNum
+
+	if job.Saver != nil && job.TaskID > 0 {
+		ackChan = make(chan writeAck, bufferSize)
+		ackWg.Add(1)
+		go func() {
+			defer ackWg.Done()
+			expectedSeq := int64(0)
+			pending := make(map[int64]writeAck)
+			completedChunks := 0
+			for ack := range ackChan {
+				if ack.seq != expectedSeq {
+					pending[ack.seq] = ack
+					continue
+				}
+				for {
+					lastCheckpointRowNum = ack.rowNum
+					completedChunks++
+					if completedChunks%checkpointFreq == 0 {
+						rowsDone := resumeRowsDone + atomic.LoadInt64(&totalWritten)
+						if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows); err != nil {
+							logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
+						}
+					}
+					expectedSeq++
+					next, ok := pending[expectedSeq]
+					if !ok {
+						break
+					}
+					delete(pending, expectedSeq)
+					ack = next
+				}
+			}
+		}()
 	}
 
 	for i := 0; i < numWriters; i++ {
@@ -959,13 +1103,14 @@ func executeRowNumberPagination(
 		writerWg.Add(1)
 		go func() {
 			defer writerWg.Done()
-			for rows := range writeJobChan {
+			for job := range writeJobChan {
 				select {
 				case <-writerCtx.Done():
 					return
 				default:
 				}
 
+				rows := job.rows
 				writeStart := time.Now()
 				var err error
 				if useUpsert {
@@ -986,6 +1131,14 @@ func executeRowNumberPagination(
 				rowCount := int64(len(rows))
 				atomic.AddInt64(&totalWritten, rowCount)
 				prog.Add(rowCount)
+
+				if ackChan != nil {
+					ackChan <- writeAck{
+						readerID: job.readerID,
+						seq:      job.seq,
+						rowNum:   job.rowNum,
+					}
+				}
 			}
 		}()
 	}
@@ -996,13 +1149,15 @@ func executeRowNumberPagination(
 	var currentRowNum int64
 	var totalOverlap time.Duration
 	var lastWriteEnd time.Time
+	var loopErr error
 
 	// Process chunks and dispatch writes
+chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
+			loopErr = result.err
 			cancelWriters()
-			close(writeJobChan)
-			return stats, result.err
+			break
 		}
 		if result.done {
 			break
@@ -1022,13 +1177,19 @@ func executeRowNumberPagination(
 
 		// Dispatch to write pool
 		select {
-		case writeJobChan <- result.rows:
+		case writeJobChan <- writeJob{
+			rows:     result.rows,
+			rowNum:   result.rowNum,
+			readerID: result.readerID,
+			seq:      result.seq,
+		}:
 		case <-writerCtx.Done():
-			close(writeJobChan)
 			if err := writeErr.Load(); err != nil {
-				return stats, fmt.Errorf("writing chunk: %w", *err)
+				loopErr = fmt.Errorf("writing chunk: %w", *err)
+			} else {
+				loopErr = writerCtx.Err()
 			}
-			return stats, writerCtx.Err()
+			break chunkLoop
 		}
 
 		// Log overlap stats periodically
@@ -1044,6 +1205,14 @@ func executeRowNumberPagination(
 	// Close write job channel and wait for writers to finish
 	close(writeJobChan)
 	writerWg.Wait()
+	if ackChan != nil {
+		close(ackChan)
+		ackWg.Wait()
+	}
+
+	if loopErr != nil {
+		return stats, loopErr
+	}
 
 	// Check for write errors
 	if err := writeErr.Load(); err != nil {
@@ -1057,16 +1226,12 @@ func executeRowNumberPagination(
 
 	// Save final progress
 	if job.Saver != nil && job.TaskID > 0 {
-		var partID *int
-		var partitionRows int64
-		if job.Partition != nil {
-			partID = &job.Partition.PartitionID
-			partitionRows = job.Partition.RowCount
-		} else {
-			partitionRows = job.Table.RowCount
+		finalRowNum := currentRowNum
+		if ackChan != nil {
+			finalRowNum = lastCheckpointRowNum
 		}
-		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, currentRowNum, totalTransferred, partitionRows); err != nil {
-			fmt.Printf("Warning: saving progress for %s: %v\n", job.Table.Name, err)
+		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalRowNum, totalTransferred, partitionRows); err != nil {
+			logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
 		}
 	}
 

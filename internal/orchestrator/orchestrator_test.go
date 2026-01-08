@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -209,6 +210,29 @@ func TestMigrationResultJSON(t *testing.T) {
 			t.Error("expected 'error' field to be omitted when empty")
 		}
 	})
+}
+
+func TestIsRetryableError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "connection reset", err: errors.New("connection reset by peer"), want: true},
+		{name: "deadlock", err: errors.New("DEADLOCK detected"), want: true},
+		{name: "context deadline", err: errors.New("context deadline exceeded"), want: true},
+		{name: "retry hint", err: errors.New("please retry later"), want: true},
+		{name: "non-retryable", err: errors.New("permission denied"), want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryableError(tc.err); got != tc.want {
+				t.Fatalf("isRetryableError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestStatusResultJSON(t *testing.T) {

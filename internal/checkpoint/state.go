@@ -1,7 +1,9 @@
 package checkpoint
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,8 +46,7 @@ type Run struct {
 	TargetSchema string
 	Config       string
 	// ConfigHash is the hash of the migration config, used for change detection on resume.
-	// NOTE: Config hash validation on resume is only enforced when using file-based state
-	// (via --state-file). The default SQLite backend does not currently persist this field.
+	// Both SQLite and file-based backends persist this field for config validation.
 	ConfigHash  string
 	ProfileName string
 	ConfigPath  string
@@ -202,6 +203,7 @@ func (s *State) ensureRunColumns() error {
 	needsConfigPath := true
 	needsError := true
 	needsPhase := true
+	needsConfigHash := true
 	for _, col := range columns {
 		switch col {
 		case "profile_name":
@@ -212,6 +214,8 @@ func (s *State) ensureRunColumns() error {
 			needsError = false
 		case "phase":
 			needsPhase = false
+		case "config_hash":
+			needsConfigHash = false
 		}
 	}
 
@@ -232,6 +236,11 @@ func (s *State) ensureRunColumns() error {
 	}
 	if needsPhase {
 		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN phase TEXT DEFAULT 'initializing'`); err != nil {
+			return err
+		}
+	}
+	if needsConfigHash {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN config_hash TEXT`); err != nil {
 			return err
 		}
 	}
@@ -355,10 +364,15 @@ func (s *State) Close() error {
 // CreateRun creates a new migration run
 func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error {
 	configJSON, _ := json.Marshal(config)
+
+	// Compute config hash for change detection on resume (matches filestate behavior)
+	hash := sha256.Sum256(configJSON)
+	configHash := hex.EncodeToString(hash[:8])
+
 	_, err := s.db.Exec(`
-		INSERT INTO runs (id, started_at, status, source_schema, target_schema, config, profile_name, config_path)
-		VALUES (?, datetime('now'), 'running', ?, ?, ?, ?, ?)
-	`, id, sourceSchema, targetSchema, string(configJSON), profileName, configPath)
+		INSERT INTO runs (id, started_at, status, source_schema, target_schema, config, profile_name, config_path, config_hash)
+		VALUES (?, datetime('now'), 'running', ?, ?, ?, ?, ?, ?)
+	`, id, sourceSchema, targetSchema, string(configJSON), profileName, configPath, configHash)
 	return err
 }
 
@@ -375,12 +389,12 @@ func (s *State) CompleteRun(id string, status string, errorMsg string) error {
 func (s *State) GetLastIncompleteRun() (*Run, error) {
 	var r Run
 	var startedAtStr string
-	var profileName, configPath, phase sql.NullString
+	var profileName, configPath, phase, configHash sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema, profile_name, config_path
+		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema, profile_name, config_path, config_hash
 		FROM runs WHERE status = 'running'
 		ORDER BY started_at DESC LIMIT 1
-	`).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath)
+	`).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath, &configHash)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -398,12 +412,21 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 	if phase.Valid {
 		r.Phase = phase.String
 	}
+	if configHash.Valid {
+		r.ConfigHash = configHash.String
+	}
 	return &r, nil
 }
 
 // UpdatePhase updates the current phase of a migration run
 func (s *State) UpdatePhase(runID, phase string) error {
 	_, err := s.db.Exec(`UPDATE runs SET phase = ? WHERE id = ?`, phase, runID)
+	return err
+}
+
+// SetRunConfigHash sets the config hash for a run (used for resume validation)
+func (s *State) SetRunConfigHash(runID, configHash string) error {
+	_, err := s.db.Exec(`UPDATE runs SET config_hash = ? WHERE id = ?`, configHash, runID)
 	return err
 }
 
@@ -802,4 +825,63 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 		r.Error = errorMsg.String
 	}
 	return &r, nil
+}
+
+// CleanupOldRuns removes completed runs older than retainDays.
+// This prevents unbounded SQLite database growth.
+func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
+	if retainDays <= 0 {
+		return 0, nil
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -retainDays).Format("2006-01-02 15:04:05")
+
+	// Delete old progress records (cascade from tasks)
+	_, err := s.db.Exec(`
+		DELETE FROM transfer_progress WHERE task_id IN (
+			SELECT id FROM tasks WHERE run_id IN (
+				SELECT id FROM runs
+				WHERE completed_at < ? AND status IN ('success', 'failed')
+			)
+		)
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("deleting old progress: %w", err)
+	}
+
+	// Delete old task outputs
+	_, err = s.db.Exec(`
+		DELETE FROM task_outputs WHERE task_id IN (
+			SELECT id FROM tasks WHERE run_id IN (
+				SELECT id FROM runs
+				WHERE completed_at < ? AND status IN ('success', 'failed')
+			)
+		)
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("deleting old task outputs: %w", err)
+	}
+
+	// Delete old tasks
+	_, err = s.db.Exec(`
+		DELETE FROM tasks WHERE run_id IN (
+			SELECT id FROM runs
+			WHERE completed_at < ? AND status IN ('success', 'failed')
+		)
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("deleting old tasks: %w", err)
+	}
+
+	// Delete old runs
+	result, err := s.db.Exec(`
+		DELETE FROM runs
+		WHERE completed_at < ? AND status IN ('success', 'failed')
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("deleting old runs: %w", err)
+	}
+
+	rowsDeleted, _ := result.RowsAffected()
+	return rowsDeleted, nil
 }
