@@ -371,14 +371,27 @@ func Execute(
 	cols := make([]string, len(job.Table.Columns))
 	targetCols := make([]string, len(job.Table.Columns))
 	colTypes := make([]string, len(job.Table.Columns))
+
+	// Only sanitize identifiers when target is PostgreSQL
+	_, isPGTarget := tgtPool.(*target.Pool)
+
 	for i, c := range job.Table.Columns {
 		cols[i] = c.Name
-		targetCols[i] = target.SanitizePGIdentifier(c.Name)
+		if isPGTarget {
+			targetCols[i] = target.SanitizePGIdentifier(c.Name)
+		} else {
+			targetCols[i] = c.Name // Preserve original case for MSSQL
+		}
 		colTypes[i] = strings.ToLower(c.DataType)
 	}
 
-	// Sanitize table name for target
-	targetTableName := target.SanitizePGIdentifier(job.Table.Name)
+	// Sanitize table name for target (only for PostgreSQL)
+	var targetTableName string
+	if isPGTarget {
+		targetTableName = target.SanitizePGIdentifier(job.Table.Name)
+	} else {
+		targetTableName = job.Table.Name // Preserve original case for MSSQL
+	}
 
 	// Choose pagination strategy
 	if job.Table.SupportsKeysetPagination() {
@@ -706,10 +719,15 @@ func executeKeysetPagination(
 	useUpsert := cfg.Migration.TargetMode == "upsert"
 	pkCols := job.Table.PrimaryKey
 
-	// Sanitize PK columns for upsert
+	// Sanitize PK columns for upsert (only for PostgreSQL targets)
+	_, isPGTarget := tgtPool.(*target.Pool)
 	targetPKCols := make([]string, len(pkCols))
 	for i, pk := range pkCols {
-		targetPKCols[i] = target.SanitizePGIdentifier(pk)
+		if isPGTarget {
+			targetPKCols[i] = target.SanitizePGIdentifier(pk)
+		} else {
+			targetPKCols[i] = pk // Preserve original case for MSSQL
+		}
 	}
 
 	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
@@ -1039,10 +1057,15 @@ func executeRowNumberPagination(
 	// Start write workers
 	useUpsert := cfg.Migration.TargetMode == "upsert"
 
-	// Sanitize PK columns for upsert
+	// Sanitize PK columns for upsert (only for PostgreSQL targets)
+	_, isPGTarget := tgtPool.(*target.Pool)
 	targetPKCols := make([]string, len(job.Table.PrimaryKey))
 	for i, pk := range job.Table.PrimaryKey {
-		targetPKCols[i] = target.SanitizePGIdentifier(pk)
+		if isPGTarget {
+			targetPKCols[i] = target.SanitizePGIdentifier(pk)
+		} else {
+			targetPKCols[i] = pk // Preserve original case for MSSQL
+		}
 	}
 
 	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
