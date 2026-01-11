@@ -87,8 +87,8 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 		targetTable     string
 		stagingTable    string
 		cols            []string
-		colTypes        []string
 		pkCols          []string
+		spatialCols     []SpatialColumn // columns that are geography/geometry with their types
 		isCrossEngine   bool
 		wantContains    []string
 		wantNotContains []string
@@ -98,8 +98,8 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			targetTable:   "[dbo].[users]",
 			stagingTable:  "#stg_users_w0",
 			cols:          []string{"id", "name", "email"},
-			colTypes:      []string{"int", "nvarchar", "nvarchar"},
 			pkCols:        []string{"id"},
+			spatialCols:   nil,
 			isCrossEngine: false,
 			wantContains: []string{
 				"MERGE INTO",
@@ -119,8 +119,8 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			targetTable:   "[sales].[order_items]",
 			stagingTable:  "#stg_order_items_w1",
 			cols:          []string{"order_id", "item_id", "quantity", "price"},
-			colTypes:      []string{"int", "int", "int", "decimal"},
 			pkCols:        []string{"order_id", "item_id"},
+			spatialCols:   nil,
 			isCrossEngine: false,
 			wantContains: []string{
 				"target.[order_id] = source.[order_id]",
@@ -134,8 +134,8 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			targetTable:   "[dbo].[data]",
 			stagingTable:  "#stg_data_w0",
 			cols:          []string{"id", "value"},
-			colTypes:      []string{"int", "nvarchar"},
 			pkCols:        []string{"id"},
+			spatialCols:   nil,
 			isCrossEngine: false,
 			wantContains: []string{
 				"target.[value] <> source.[value]",
@@ -148,8 +148,8 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			targetTable:   "[sales].[customers]",
 			stagingTable:  "#stg_customers_w0",
 			cols:          []string{"id", "name", "location"},
-			colTypes:      []string{"int", "nvarchar", "geography"},
 			pkCols:        []string{"id"},
+			spatialCols:   []SpatialColumn{{Name: "location", TypeName: "geography"}},
 			isCrossEngine: false,
 			wantContains: []string{
 				"[location] = source.[location]", // geography is updated directly
@@ -165,8 +165,8 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			targetTable:   "[dbo].[shapes]",
 			stagingTable:  "#stg_shapes_w0",
 			cols:          []string{"id", "shape", "label"},
-			colTypes:      []string{"int", "geometry", "nvarchar"},
 			pkCols:        []string{"id"},
+			spatialCols:   []SpatialColumn{{Name: "shape", TypeName: "geometry"}},
 			isCrossEngine: false,
 			wantContains: []string{
 				"[shape] = source.[shape]", // geometry is updated directly
@@ -182,8 +182,8 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			targetTable:   "[sales].[customers]",
 			stagingTable:  "#stg_customers_w0",
 			cols:          []string{"id", "name", "location"},
-			colTypes:      []string{"int", "nvarchar", "geography"},
 			pkCols:        []string{"id"},
+			spatialCols:   []SpatialColumn{{Name: "location", TypeName: "geography"}},
 			isCrossEngine: true,
 			wantContains: []string{
 				"geography::STGeomFromText(source.[location], 4326)", // WKT conversion in SET
@@ -198,8 +198,8 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			targetTable:   "[dbo].[shapes]",
 			stagingTable:  "#stg_shapes_w0",
 			cols:          []string{"id", "shape", "label"},
-			colTypes:      []string{"int", "geometry", "nvarchar"},
 			pkCols:        []string{"id"},
+			spatialCols:   []SpatialColumn{{Name: "shape", TypeName: "geometry"}},
 			isCrossEngine: true,
 			wantContains: []string{
 				"geometry::STGeomFromText(source.[shape], 4326)", // WKT conversion
@@ -213,7 +213,7 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildMSSQLMergeWithTablock(tt.targetTable, tt.stagingTable, tt.cols, tt.colTypes, tt.pkCols, tt.isCrossEngine)
+			got := buildMSSQLMergeWithTablock(tt.targetTable, tt.stagingTable, tt.cols, tt.pkCols, tt.spatialCols, tt.isCrossEngine)
 
 			for _, want := range tt.wantContains {
 				if !strings.Contains(got, want) {

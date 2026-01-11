@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -36,8 +37,15 @@ func NewMSSQLPool(cfg *config.TargetConfig, maxConns int, rowsPerBatch int, sour
 	if cfg.TrustServerCert {
 		trustCert = "true"
 	}
+
+	// URL-encode values that may contain special characters to prevent DSN injection
+	// Use QueryEscape for user/password to encode @ and : which are reserved in userinfo
+	encodedUser := url.QueryEscape(cfg.User)
+	encodedPass := url.QueryEscape(cfg.Password)
+	encodedDB := url.QueryEscape(cfg.Database)
+
 	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, encryptStr, trustCert)
+		encodedUser, encodedPass, cfg.Host, cfg.Port, encodedDB, encryptStr, trustCert)
 
 	// Add packet size for better throughput (default 4KB is too small)
 	if cfg.PacketSize > 0 {
@@ -450,14 +458,18 @@ func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table str
 		return fmt.Errorf("creating staging table: %w", err)
 	}
 
-	// 2a. For cross-engine migrations (PG→MSSQL), alter geography/geometry columns to nvarchar(max)
-	// This allows bulk insert of WKT text, which will be converted back in MERGE
+	// 2a. Detect geography/geometry columns in staging table
+	// These must be excluded from change detection (SQL Server doesn't support <> on spatial types)
 	isCrossEngine := p.sourceType == "postgres"
-	var spatialCols []string
-	if isCrossEngine {
-		var err error
-		spatialCols, err = p.alterSpatialColumnsToText(ctx, conn, stagingTable)
-		if err != nil {
+	spatialCols, err := p.getSpatialColumns(ctx, conn, stagingTable)
+	if err != nil {
+		return fmt.Errorf("detecting spatial columns: %w", err)
+	}
+
+	// 2b. For cross-engine migrations (PG→MSSQL), alter geography/geometry columns to nvarchar(max)
+	// This allows bulk insert of WKT text, which will be converted back in MERGE
+	if isCrossEngine && len(spatialCols) > 0 {
+		if err := p.alterSpatialColumnsToText(ctx, conn, stagingTable, spatialCols); err != nil {
 			return fmt.Errorf("altering spatial columns: %w", err)
 		}
 	}
@@ -515,9 +527,9 @@ func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table str
 	}
 
 	// 5. Build and execute MERGE with deadlock retry
-	// Pass spatialCols to identify columns that need WKT→geography conversion
-	// and should be skipped from change detection
-	mergeSQL := buildMSSQLMergeWithTablock(targetTable, stagingTable, mappedCols, mappedPKCols, spatialCols)
+	// Pass spatialCols to identify columns that should be skipped from change detection
+	// Pass isCrossEngine to determine if STGeomFromText conversion is needed (PG→MSSQL)
+	mergeSQL := buildMSSQLMergeWithTablock(targetTable, stagingTable, mappedCols, mappedPKCols, spatialCols, isCrossEngine)
 	if err := p.executeMergeWithRetry(ctx, conn, targetTable, mergeSQL, hasIdentity, 5); err != nil {
 		return fmt.Errorf("merge failed: %w", err)
 	}
@@ -582,14 +594,16 @@ func (p *MSSQLPool) getStagingTableColumns(ctx context.Context, conn *sql.Conn, 
 	return cols, nil
 }
 
-// alterSpatialColumnsToText alters geography/geometry columns in a staging table to nvarchar(max).
-// This is needed for cross-engine migrations (PG→MSSQL) where spatial data comes as WKT text.
-// The MERGE statement will convert text back to geography using STGeomFromText.
-// We query the staging table directly to find spatial columns because the source (PG) column types
-// may be 'text' (WKT representation) while the target column is 'geography'.
-func (p *MSSQLPool) alterSpatialColumnsToText(ctx context.Context, conn *sql.Conn, stagingTable string) ([]string, error) {
-	// Query staging table to find geography/geometry columns
-	// The staging table was created from the target, so it has the target's column types
+// SpatialColumn represents a geography or geometry column with its type.
+type SpatialColumn struct {
+	Name     string
+	TypeName string // "geography" or "geometry"
+}
+
+// getSpatialColumns returns geography/geometry columns in a staging table with their types.
+// This is used to exclude spatial columns from change detection in MERGE statements,
+// since SQL Server doesn't support comparison operators on spatial types.
+func (p *MSSQLPool) getSpatialColumns(ctx context.Context, conn *sql.Conn, stagingTable string) ([]SpatialColumn, error) {
 	query := `
 		SELECT c.name, t.name AS type_name
 		FROM tempdb.sys.columns c
@@ -604,20 +618,13 @@ func (p *MSSQLPool) alterSpatialColumnsToText(ctx context.Context, conn *sql.Con
 	}
 	defer rows.Close()
 
-	var spatialCols []string
+	var spatialCols []SpatialColumn
 	for rows.Next() {
-		var colName, typeName string
-		if err := rows.Scan(&colName, &typeName); err != nil {
+		var col SpatialColumn
+		if err := rows.Scan(&col.Name, &col.TypeName); err != nil {
 			return nil, fmt.Errorf("scanning spatial column: %w", err)
 		}
-		spatialCols = append(spatialCols, colName)
-
-		// Alter the column to nvarchar(max) to accept WKT text
-		alterSQL := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s nvarchar(max)`,
-			stagingTable, quoteMSSQLIdent(colName))
-		if _, err := conn.ExecContext(ctx, alterSQL); err != nil {
-			return nil, fmt.Errorf("altering column %s to nvarchar(max): %w", colName, err)
-		}
+		spatialCols = append(spatialCols, col)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -625,6 +632,20 @@ func (p *MSSQLPool) alterSpatialColumnsToText(ctx context.Context, conn *sql.Con
 	}
 
 	return spatialCols, nil
+}
+
+// alterSpatialColumnsToText alters geography/geometry columns in a staging table to nvarchar(max).
+// This is needed for cross-engine migrations (PG→MSSQL) where spatial data comes as WKT text.
+// The MERGE statement will convert text back to geography using STGeomFromText.
+func (p *MSSQLPool) alterSpatialColumnsToText(ctx context.Context, conn *sql.Conn, stagingTable string, spatialCols []SpatialColumn) error {
+	for _, col := range spatialCols {
+		alterSQL := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s nvarchar(max)`,
+			stagingTable, quoteMSSQLIdent(col.Name))
+		if _, err := conn.ExecContext(ctx, alterSQL); err != nil {
+			return fmt.Errorf("altering column %s to nvarchar(max): %w", col.Name, err)
+		}
+	}
+	return nil
 }
 
 // bulkInsertToTempTable performs TDS bulk insert into a #temp table
@@ -671,13 +692,18 @@ func (p *MSSQLPool) bulkInsertToTempTable(ctx context.Context, conn *sql.Conn, t
 
 // buildMSSQLMergeWithTablock generates a MERGE statement with TABLOCK hint.
 // TABLOCK prevents S->X lock conversion deadlocks that are common with MERGE.
-// spatialCols lists columns that are geography/geometry - these need WKT→spatial conversion
-// and are skipped from change detection (SQL Server doesn't support comparison operators on spatial types).
-func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, pkCols, spatialCols []string) string {
-	// Build spatial column lookup (case-insensitive)
-	spatialSet := make(map[string]bool, len(spatialCols))
+// spatialCols lists columns that are geography/geometry - these are skipped from change detection
+// (SQL Server doesn't support comparison operators on spatial types).
+// isCrossEngine indicates if this is a cross-engine migration (PG→MSSQL) which requires
+// STGeomFromText conversion for spatial columns (WKT text → geography/geometry).
+//
+// NOTE: SRID 4326 (WGS84) is hardcoded for geography conversion. This works for most GPS/mapping
+// use cases. Future enhancement: query source SRID from PostGIS ST_SRID() or SQL Server metadata.
+func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, pkCols []string, spatialCols []SpatialColumn, isCrossEngine bool) string {
+	// Build spatial column lookup (case-insensitive) -> type name
+	spatialMap := make(map[string]string, len(spatialCols))
 	for _, col := range spatialCols {
-		spatialSet[strings.ToLower(col)] = true
+		spatialMap[strings.ToLower(col.Name)] = col.TypeName
 	}
 
 	// Build ON clause (PK join condition)
@@ -701,11 +727,11 @@ func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, pkCols, 
 			sourceExpr := fmt.Sprintf("source.%s", quotedCol)
 
 			// Check if this is a spatial column (case-insensitive)
-			isSpatial := spatialSet[strings.ToLower(col)]
-			if isSpatial {
-				// Use STGeomFromText to convert WKT text to geography
+			spatialType, isSpatial := spatialMap[strings.ToLower(col)]
+			if isSpatial && isCrossEngine {
+				// Use STGeomFromText to convert WKT text to geography/geometry (PG→MSSQL only)
 				// SRID 4326 is WGS84 (standard GPS coordinates)
-				sourceExpr = fmt.Sprintf("geography::STGeomFromText(source.%s, 4326)", quotedCol)
+				sourceExpr = fmt.Sprintf("%s::STGeomFromText(source.%s, 4326)", spatialType, quotedCol)
 			}
 
 			setClauses = append(setClauses, fmt.Sprintf("%s = %s", quotedCol, sourceExpr))
@@ -731,10 +757,10 @@ func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, pkCols, 
 		quotedCol := quoteMSSQLIdent(col)
 		quotedCols[i] = quotedCol
 
-		// Check if this is a spatial column
-		isSpatial := spatialSet[strings.ToLower(col)]
-		if isSpatial {
-			sourceCols[i] = fmt.Sprintf("geography::STGeomFromText(source.%s, 4326)", quotedCol)
+		// Check if this is a spatial column - only use STGeomFromText for cross-engine (PG→MSSQL)
+		spatialType, isSpatial := spatialMap[strings.ToLower(col)]
+		if isSpatial && isCrossEngine {
+			sourceCols[i] = fmt.Sprintf("%s::STGeomFromText(source.%s, 4326)", spatialType, quotedCol)
 		} else {
 			sourceCols[i] = fmt.Sprintf("source.%s", quotedCol)
 		}
@@ -825,21 +851,64 @@ func convertRowForBulkCopy(row []any) []any {
 	return result
 }
 
-// isASCIINumeric checks if a byte slice contains only ASCII numeric characters
-// (digits, decimal point, minus sign, plus sign). This is used to distinguish
-// decimal/money values (which come as ASCII strings like "3000.00") from
-// binary data (geography, varbinary) which contains non-printable bytes.
+// isASCIINumeric checks if a byte slice contains a valid ASCII numeric value.
+// This is used to distinguish decimal/money values (which come as ASCII strings
+// like "3000.00" or "-1.5E+10") from binary data (geography, varbinary) which
+// contains non-printable bytes.
+//
+// Valid patterns: "123", "-45.67", "+0.5", "1.5E+10", "1e-5", ".5", "-.5"
+// Invalid: "", ".", "+-1", "1.2.3", "abc", binary data
 func isASCIINumeric(b []byte) bool {
 	if len(b) == 0 {
 		return false
 	}
-	for _, c := range b {
-		// Allow: 0-9, decimal point, minus, plus, 'E'/'e' for scientific notation
-		if !((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'E' || c == 'e') {
-			return false
+
+	hasDigit := false
+	hasDot := false
+	hasE := false
+	i := 0
+
+	// Optional leading sign
+	if b[i] == '+' || b[i] == '-' {
+		i++
+		if i >= len(b) {
+			return false // Just a sign is invalid
 		}
 	}
-	return true
+
+	// Process main number part
+	for i < len(b) {
+		c := b[i]
+		switch {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case c == '.':
+			if hasDot || hasE {
+				return false // Multiple dots or dot after exponent
+			}
+			hasDot = true
+		case c == 'E' || c == 'e':
+			if hasE || !hasDigit {
+				return false // Multiple E or E without preceding digits
+			}
+			hasE = true
+			// E can be followed by optional sign and digits
+			i++
+			if i < len(b) && (b[i] == '+' || b[i] == '-') {
+				i++
+			}
+			// Must have at least one digit after E
+			if i >= len(b) || b[i] < '0' || b[i] > '9' {
+				return false
+			}
+			continue // Skip increment below, we already moved forward
+		default:
+			return false // Invalid character
+		}
+		i++
+	}
+
+	return hasDigit // Must have at least one digit
 }
 
 // isDeadlockError checks if the error is a SQL Server deadlock (error 1205)

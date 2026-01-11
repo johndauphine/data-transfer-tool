@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -20,8 +21,14 @@ type PostgresPool struct {
 
 // NewPostgresPool creates a new PostgreSQL source connection pool
 func NewPostgresPool(cfg *config.SourceConfig, maxConns int) (*PostgresPool, error) {
+	// URL-encode values that may contain special characters to prevent DSN injection
+	// Use QueryEscape for user/password/database to encode special characters consistently
+	encodedUser := url.QueryEscape(cfg.User)
+	encodedPass := url.QueryEscape(cfg.Password)
+	encodedDB := url.QueryEscape(cfg.Database)
+
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, cfg.SSLMode)
+		encodedUser, encodedPass, cfg.Host, cfg.Port, encodedDB, cfg.SSLMode)
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -38,8 +39,15 @@ func NewPool(cfg *config.SourceConfig, maxConns int) (*Pool, error) {
 	if cfg.TrustServerCert {
 		trustCert = "true"
 	}
+
+	// URL-encode values that may contain special characters to prevent DSN injection
+	// Use QueryEscape for user/password to encode @ and : which are reserved in userinfo
+	encodedUser := url.QueryEscape(cfg.User)
+	encodedPass := url.QueryEscape(cfg.Password)
+	encodedDB := url.QueryEscape(cfg.Database)
+
 	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, encryptStr, trustCert)
+		encodedUser, encodedPass, cfg.Host, cfg.Port, encodedDB, encryptStr, trustCert)
 
 	// Add packet size for better throughput (default 4KB is too small)
 	if cfg.PacketSize > 0 {
