@@ -36,6 +36,55 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 
 Starting with v1.10.0, credentials are always redacted before being stored.
 
+## Incremental Sync (New in v1.31.0)
+
+For large databases with frequent updates, use **date-based incremental loading** to dramatically reduce sync times. Instead of transferring all rows every time, only rows modified since the last sync are transferred.
+
+### Recommended Workflow
+
+```bash
+# Step 1: Initial load (fast bulk copy, creates tables)
+./mssql-pg-migrate -c config.yaml run   # target_mode: drop_recreate
+
+# Step 2: Incremental syncs (uses highwater marks)
+./mssql-pg-migrate -c config.yaml run   # target_mode: upsert
+```
+
+### Performance Impact
+
+| Scenario | Time |
+|----------|------|
+| Full sync (19M rows) | 1m 47s |
+| Incremental (no changes) | **12 seconds** |
+
+### Configuration
+
+```yaml
+migration:
+  target_mode: upsert     # Required for incremental sync
+
+  # Date columns for incremental loading (tries each in order)
+  # Supported types: datetime, datetime2, timestamp, timestamptz, date
+  date_updated_columns:
+    - UpdatedAt           # Common convention
+    - ModifiedDate        # SQL Server convention
+    - LastModified
+    - CreationDate        # Fallback for append-only tables
+```
+
+### How It Works
+
+1. **First run**: Full load of all rows, records sync timestamp per table
+2. **Subsequent runs**: Only fetches rows where `date_column > last_sync_timestamp`
+3. **Highwater marks**: Stored automatically in the state database (`~/.mssql-pg-migrate/migrate.db`)
+4. **Upsert logic**: INSERTs new rows, UPDATEs changed rows, preserves target-only rows
+
+### Important Notes
+
+- **Upsert requires existing tables** - Run `drop_recreate` first for initial load
+- **Primary keys required** - Both source and target tables must have PKs
+- **Tables without date columns** - Fall back to full table comparison (slower)
+
 ## Encrypted Profiles (SQLite)
 
 You can store full configuration profiles (including secrets) encrypted at rest inside the same SQLite database used for run history.
@@ -325,7 +374,7 @@ sensor = PythonSensor(
 | PostgreSQL | PostgreSQL | COPY protocol |
 | SQL Server | SQL Server | TDS bulk copy |
 
-### Same-Engine Migrations (New in v1.16.0)
+### Same-Engine Migrations (New in v1.31.0)
 
 Same-engine migrations (PG→PG, MSSQL→MSSQL) are now supported with all target modes:
 
@@ -354,6 +403,7 @@ migration:
 ## Features
 
 - **Bidirectional migration** - SQL Server ↔ PostgreSQL
+- **Incremental sync** - Date-based highwater marks for fast delta transfers (seconds vs minutes)
 - **Auto-tuning** - Workers, connection pools, and buffers sized based on CPU/RAM
 - **Fast transfers** using PostgreSQL COPY protocol (MSSQL→PG) or TDS bulk copy (PG→MSSQL)
 - **Pipelined I/O** - Read-ahead buffering and parallel writers for maximum throughput
@@ -384,21 +434,21 @@ Download from [GitHub Releases](https://github.com/johndauphine/mssql-pg-migrate
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.16.0/mssql-pg-migrate-v1.16.0-linux-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.16.0-linux-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.31.0/mssql-pg-migrate-v1.31.0-linux-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.31.0-linux-amd64.tar.gz
 chmod +x mssql-pg-migrate-linux-amd64
 ./mssql-pg-migrate-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.16.0/mssql-pg-migrate-v1.16.0-darwin-arm64.tar.gz
-tar -xzf mssql-pg-migrate-v1.16.0-darwin-arm64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.31.0/mssql-pg-migrate-v1.31.0-darwin-arm64.tar.gz
+tar -xzf mssql-pg-migrate-v1.31.0-darwin-arm64.tar.gz
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.16.0/mssql-pg-migrate-v1.16.0-darwin-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.16.0-darwin-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.31.0/mssql-pg-migrate-v1.31.0-darwin-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.31.0-darwin-amd64.tar.gz
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.16.0/mssql-pg-migrate-v1.16.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
+Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.31.0/mssql-pg-migrate-v1.31.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
 tar -xzf mssql-pg-migrate.tar.gz
 ```
 
@@ -572,7 +622,8 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `target_mode` | No | `drop_recreate` | How to handle existing tables: `drop_recreate` (drop and recreate) or `upsert` (incremental sync) |
+| `target_mode` | No | `drop_recreate` | How to handle existing tables: `drop_recreate` (drop and recreate) or `upsert` (incremental sync). **Note:** `upsert` requires target tables to already exist - run `drop_recreate` first for initial load. |
+| `date_updated_columns` | No | None | List of column names to check for last-modified date (e.g., `UpdatedAt`, `ModifiedDate`). Enables incremental sync - only rows modified since last sync are transferred. |
 | `data_dir` | No | `~/.mssql-pg-migrate` | Directory for state database and temporary files |
 
 **Schema Object Creation:**
