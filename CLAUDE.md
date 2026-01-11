@@ -85,11 +85,11 @@ examples/                   # Example configuration files
 
 ### Latest Commits
 ```
-a4deced chore: add WideWorldImporters benchmark config files
-a9afd24 Merge pull request #37 - feat: improve incremental sync logging
-aac2d65 chore: add PG to PG incremental sync benchmark config
-b1a4fb7 feat: add date-based incremental loading for upsert mode
-60ae853 refactor: remove deprecated staging table upsert code
+0b7ece2 docs: remove geography limitation from README
+30f43a7 fix: exclude geography/geometry from MERGE change detection
+6f8e905 feat: add helpful warning for geography/geometry upsert failures
+8f79202 fix: preserve binary data in MSSQL bulk copy conversion
+8d49c79 fix: handle decimal columns in MSSQL to MSSQL bulk copy
 ```
 
 ### Major Features
@@ -254,6 +254,30 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ## Session History
 
+### Session 7: MSSQL to MSSQL Fixes & Geography Support (Claude - January 11, 2026)
+1. Fixed MSSQL→MSSQL decimal column bulk copy (PR #39):
+   - SQL Server returns decimal/money as `[]byte` (ASCII string like "3000.00")
+   - go-mssqldb bulk copy doesn't handle `[]byte` for decimal columns
+   - Added `convertRowForBulkCopy()` to convert `[]byte` to string
+2. Fixed binary data preservation in bulk copy (PR #40):
+   - Initial fix converted ALL `[]byte` to string, breaking geography columns
+   - Added `isASCIINumeric()` to only convert numeric byte arrays
+   - Geography/varbinary data now passes through unchanged
+3. Added geography/geometry support for upsert mode (PR #42):
+   - SQL Server doesn't support `<>` operator on spatial types
+   - MERGE change detection was failing for tables with geography columns
+   - Solution: Pass column types through pipeline, skip spatial columns from change detection
+   - Spatial columns are still updated (SET clause) but not compared
+   - Updated `UpsertChunkWithWriter` interface to accept `colTypes`
+   - Added unit tests for geography/geometry exclusion
+4. Added helpful warning for geography upsert failures (PR #41):
+   - Shows HINT message when spatial comparison error detected
+   - Suggests using `drop_recreate` or `exclude_tables`
+5. Test results with WideWorldImporters:
+   - MSSQL→MSSQL drop_recreate: 9/9 tables, 701K rows at 264K rows/sec
+   - MSSQL→MSSQL upsert: 9/9 tables (including Customers with geography), 202K rows/sec
+6. Updated README: Added then removed "Known Limitations" for geography (now fixed)
+
 ### Session 6: Incremental Logging & WideWorldImporters Testing (Claude - January 11, 2026)
 1. Investigated why 25 rows transferred during incremental sync - discovered lookup tables (`posttypes`, `linktypes`, `votetypes`) without date columns sync fully each run
 2. Improved incremental sync logging for all migration paths (PR #37):
@@ -319,11 +343,11 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ## Known Issues / TODOs
 
-1. **Geography/geometry columns not supported** - SQL Server spatial data types cause UTF-8 errors; needs PostGIS support or WKT conversion
-2. **Tables without PKs rejected** - Temporal archive tables (`*_Archive`) and other PK-less tables cannot be migrated
-3. **Kerberos not tested in production** - Implementation complete but needs real environment testing
-4. **Windows ACL check is heuristic** - Uses icacls output parsing
-5. **Profile encryption key management** - Currently environment variable only
+1. **Tables without PKs rejected** - Temporal archive tables (`*_Archive`) and other PK-less tables cannot be migrated
+2. **Kerberos not tested in production** - Implementation complete but needs real environment testing
+3. **Windows ACL check is heuristic** - Uses icacls output parsing
+4. **Profile encryption key management** - Currently environment variable only
+5. **Geography/geometry upsert behavior** - Spatial columns are always updated in upsert mode (not compared for changes) since SQL Server doesn't support `<>` on spatial types
 
 ## Contact
 
