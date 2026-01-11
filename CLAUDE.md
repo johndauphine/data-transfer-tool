@@ -85,9 +85,9 @@ examples/                   # Example configuration files
 
 ### Latest Commits
 ```
-02604ab docs: add incremental sync workflow to README
-6b413de chore: bump version to 1.31.0
-547f922 Merge pull request #36 - feat: require existing tables for upsert mode
+a4deced chore: add WideWorldImporters benchmark config files
+a9afd24 Merge pull request #37 - feat: improve incremental sync logging
+aac2d65 chore: add PG to PG incremental sync benchmark config
 b1a4fb7 feat: add date-based incremental loading for upsert mode
 60ae853 refactor: remove deprecated staging table upsert code
 ```
@@ -254,6 +254,24 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ## Session History
 
+### Session 6: Incremental Logging & WideWorldImporters Testing (Claude - January 11, 2026)
+1. Investigated why 25 rows transferred during incremental sync - discovered lookup tables (`posttypes`, `linktypes`, `votetypes`) without date columns sync fully each run
+2. Improved incremental sync logging for all migration paths (PR #37):
+   - Incremental: `Table X: incremental - syncing rows where column > timestamp`
+   - First sync: `Table X: first sync - loading all N rows, will use column for future incremental syncs`
+   - Full sync: `Table X: full sync - no date column, syncing all N rows (repeated each run)`
+   - Added summary: `Incremental sync summary: 6 tables incremental, 0 tables first sync, 3 tables full sync`
+3. Set up WideWorldImporters sample database for testing:
+   - Downloaded from Microsoft GitHub releases (122MB backup)
+   - Created Docker containers: `mssql-wwi` (port 1435), `pg-wwi` (port 5435)
+   - Database has 48 tables, 4.7M rows across 4 schemas
+4. Discovered limitations with WideWorldImporters:
+   - **Geography columns**: SQL Server spatial data causes UTF-8 errors (needs PostGIS or WKT conversion)
+   - **Archive tables**: Temporal history tables (`*_Archive`) don't have primary keys
+5. Created benchmark configs for WWI:
+   - `examples/benchmark-wwi-sales.yaml`: 8 tables, 700K rows, 428K rows/sec
+   - `examples/benchmark-wwi-warehouse.yaml`: 9 tables, 300K rows, 172K rows/sec
+
 ### Session 5: Incremental Sync & Upsert Improvements (Claude - January 10, 2026)
 1. Ran full benchmark suite with SO2010 dataset (downloaded via aria2, restored to Docker containers)
 2. Tested all 4 migration directions: MSSQL→PG, PG→MSSQL, PG→PG, MSSQL→MSSQL
@@ -301,9 +319,11 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ## Known Issues / TODOs
 
-1. **Kerberos not tested in production** - Implementation complete but needs real environment testing
-2. **Windows ACL check is heuristic** - Uses icacls output parsing
-3. **Profile encryption key management** - Currently environment variable only
+1. **Geography/geometry columns not supported** - SQL Server spatial data types cause UTF-8 errors; needs PostGIS support or WKT conversion
+2. **Tables without PKs rejected** - Temporal archive tables (`*_Archive`) and other PK-less tables cannot be migrated
+3. **Kerberos not tested in production** - Implementation complete but needs real environment testing
+4. **Windows ACL check is heuristic** - Uses icacls output parsing
+5. **Profile encryption key management** - Currently environment variable only
 
 ## Contact
 
