@@ -1,0 +1,36 @@
+# PG to PG incremental sync using separate containers
+# Source: pg-so2010 (port 5433)
+# Target: pg-so2010-target (port 5434)
+
+source:
+  type: postgres
+  host: localhost
+  port: 5433
+  database: so2010
+  user: postgres
+  password: "PostgresPassword123"
+  schema: public
+  ssl_mode: disable
+
+target:
+  type: postgres
+  host: localhost
+  port: 5434
+  database: so2010
+  user: postgres
+  password: "PostgresPassword123"
+  schema: public
+  ssl_mode: disable
+
+migration:
+  target_mode: upsert
+  workers: 6
+  chunk_size: 50000
+  create_indexes: false
+  create_foreign_keys: false
+
+  # Date columns for incremental loading
+  date_updated_columns:
+    - lastactivitydate
+    - creationdate
+    - date
