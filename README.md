@@ -36,7 +36,7 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 
 Starting with v1.10.0, credentials are always redacted before being stored.
 
-## Incremental Sync (New in v1.31.0)
+## Incremental Sync (New in v1.40.0)
 
 For large databases with frequent updates, use **date-based incremental loading** to dramatically reduce sync times. Instead of transferring all rows every time, only rows modified since the last sync are transferred.
 
@@ -358,9 +358,10 @@ sensor = PythonSensor(
 
 ## Performance
 
-- **79K-472K rows/sec** depending on direction and mode
+- **148K-524K rows/sec** depending on direction and mode
+- **MSSQL → MSSQL**: 485-524K rows/sec (32KB TDS packets)
 - **PG → PG**: 472K rows/sec (fastest, COPY both ends)
-- **MSSQL → PG**: 323K rows/sec (COPY protocol)
+- **MSSQL → PG**: 400-432K rows/sec (32KB packets + COPY protocol)
 - **PG → MSSQL**: 196K rows/sec (TDS bulk copy)
 - **Auto-tuning** based on CPU cores and available RAM
 - **2-6x faster** than equivalent Python/Airflow solutions
@@ -374,7 +375,7 @@ sensor = PythonSensor(
 | PostgreSQL | PostgreSQL | COPY protocol |
 | SQL Server | SQL Server | TDS bulk copy |
 
-### Same-Engine Migrations (New in v1.31.0)
+### Same-Engine Migrations (New in v1.40.0)
 
 Same-engine migrations (PG→PG, MSSQL→MSSQL) are now supported with all target modes:
 
@@ -434,21 +435,21 @@ Download from [GitHub Releases](https://github.com/johndauphine/mssql-pg-migrate
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.31.0/mssql-pg-migrate-v1.31.0-linux-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.31.0-linux-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.40.0/mssql-pg-migrate-v1.40.0-linux-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.40.0-linux-amd64.tar.gz
 chmod +x mssql-pg-migrate-linux-amd64
 ./mssql-pg-migrate-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.31.0/mssql-pg-migrate-v1.31.0-darwin-arm64.tar.gz
-tar -xzf mssql-pg-migrate-v1.31.0-darwin-arm64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.40.0/mssql-pg-migrate-v1.40.0-darwin-arm64.tar.gz
+tar -xzf mssql-pg-migrate-v1.40.0-darwin-arm64.tar.gz
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.31.0/mssql-pg-migrate-v1.31.0-darwin-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.31.0-darwin-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.40.0/mssql-pg-migrate-v1.40.0-darwin-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.40.0-darwin-amd64.tar.gz
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.31.0/mssql-pg-migrate-v1.31.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
+Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.40.0/mssql-pg-migrate-v1.40.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
 tar -xzf mssql-pg-migrate.tar.gz
 ```
 
@@ -561,8 +562,9 @@ The `source` section configures the database to migrate FROM.
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `ssl_mode` | No | `require` | PostgreSQL SSL mode: `disable`, `require`, `verify-ca`, `verify-full` |
-| `encrypt` | No | `true` | SQL Server encryption: `disable`, `false`, `true` |
+| `encrypt` | No | `true` | SQL Server encryption: `true` or `false` |
 | `trust_server_cert` | No | `false` | SQL Server: Skip certificate validation (use only for testing) |
+| `packet_size` | No | `32767` | SQL Server TDS packet size in bytes (max: 32767). Larger packets improve throughput. |
 
 **Kerberos Settings (source):**
 
@@ -1169,17 +1171,19 @@ All migration directions with both target modes:
 
 | Direction | drop_recreate | upsert |
 |-----------|---------------|--------|
-| **MSSQL → PG** | 323K rows/sec | 296K rows/sec |
-| **PG → MSSQL** | 196K rows/sec | 148K rows/sec |
-| **MSSQL → MSSQL** | 183K rows/sec | 79K rows/sec |
+| **MSSQL → MSSQL** | 485-524K rows/sec | 349-368K rows/sec |
 | **PG → PG** | 472K rows/sec | 337K rows/sec |
+| **MSSQL → PG** | 400-432K rows/sec | 261-272K rows/sec |
+| **PG → MSSQL** | 196K rows/sec | 148K rows/sec |
+
+*Note: MSSQL source performance improved significantly in v1.40.0 with 32KB TDS packet size (default).*
 
 ### Key Observations
 
-- **PG → PG** is fastest due to COPY protocol on both ends
-- **MSSQL → PG** is faster than PG → MSSQL (PG COPY more efficient than MSSQL bulk insert)
-- **Upsert overhead**: 8-57% slower than drop_recreate depending on direction
-- **MSSQL → MSSQL upsert** is slowest due to IDENTITY_INSERT + MERGE complexity
+- **MSSQL → MSSQL** is now fastest with 32KB TDS packets on both ends
+- **PG → PG** uses COPY protocol on both ends for excellent throughput
+- **MSSQL → PG** benefits from 32KB packets + PostgreSQL COPY protocol
+- **Upsert overhead**: 25-35% slower than drop_recreate depending on direction
 
 Performance varies based on:
 - Network latency between source and target
