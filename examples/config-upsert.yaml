@@ -18,6 +18,7 @@
 # - Configure date_updated_columns to filter rows by last-modified date
 # - Highwater marks are stored automatically in the state database
 # - Subsequent runs only fetch rows modified since the last sync
+# - Dramatically reduces transfer time for large tables with few changes
 #
 # Performance Notes:
 # - Full upsert is 2-5x slower than drop_recreate (index maintenance overhead)
@@ -61,6 +62,7 @@ migration:
   target_mode: upsert     # Enable incremental sync
 
   # Date columns for incremental loading (tries each column name in order)
+  # Supported types: datetime, datetime2, timestamp, timestamptz, date
   # Highwater marks are stored automatically - subsequent runs only fetch
   # rows where date_column > last_sync_timestamp
   date_updated_columns:
