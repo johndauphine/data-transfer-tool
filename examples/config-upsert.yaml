@@ -26,6 +26,12 @@
 #
 # For initial sync (empty target), upsert mode behaves like bulk insert.
 # For subsequent syncs, only changed/new rows are processed.
+#
+# Date-Based Incremental Loading:
+# - Configure date_updated_columns to filter rows by last-modified timestamp
+# - Only rows modified since last successful sync are transferred
+# - First sync does full load, subsequent syncs filter by timestamp
+# - Dramatically reduces transfer time for large tables with few changes
 
 source:
   type: mssql
@@ -52,6 +58,15 @@ migration:
   workers: 4
   chunk_size: 10000       # Smaller chunks recommended for upsert
   target_mode: upsert     # Enable incremental sync
+
+  # Date-based incremental loading (optional)
+  # List column names to check for last-modified date (tries each in order)
+  # Supported types: datetime, datetime2, timestamp, timestamptz, date
+  date_updated_columns:
+    - UpdatedAt
+    - ModifiedDate
+    - LastModified
+    - CreatedAt
 
   # Optional: Filter tables for incremental sync
   # include_tables:
