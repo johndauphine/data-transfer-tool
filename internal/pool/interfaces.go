@@ -69,7 +69,8 @@ type TargetPool interface {
 	// - MSSQL: Uses #temp tables + bulk insert + MERGE WITH (TABLOCK)
 	// writerID identifies the writer goroutine (0, 1, 2, ...) for staging table isolation
 	// partitionID is optional and used when intra-table partitioning is enabled
-	UpsertChunkWithWriter(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error
+	// colTypes contains the data types for each column (used to skip geography/geometry from change detection)
+	UpsertChunkWithWriter(ctx context.Context, schema, table string, cols []string, colTypes []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error
 
 	// Pool info
 	MaxConns() int

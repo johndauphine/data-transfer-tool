@@ -406,8 +406,9 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 // 2. TDS bulk insert into staging (fast, single round-trip)
 // 3. MERGE WITH (TABLOCK) immediately after each chunk
 // 4. Deadlock retry with linear backoff (5 retries)
+// colTypes is used to skip geography/geometry columns from change detection in MERGE
 func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table string,
-	cols []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
+	cols []string, colTypes []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
 
 	if len(rows) == 0 {
 		return nil
@@ -493,7 +494,8 @@ func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table str
 	}
 
 	// 5. Build and execute MERGE with deadlock retry
-	mergeSQL := buildMSSQLMergeWithTablock(targetTable, stagingTable, mappedCols, mappedPKCols)
+	// Pass colTypes to skip geography/geometry from change detection
+	mergeSQL := buildMSSQLMergeWithTablock(targetTable, stagingTable, mappedCols, colTypes, mappedPKCols)
 	if err := p.executeMergeWithRetry(ctx, conn, targetTable, mergeSQL, hasIdentity, 5); err != nil {
 		return fmt.Errorf("merge failed: %w", err)
 	}
@@ -602,7 +604,9 @@ func (p *MSSQLPool) bulkInsertToTempTable(ctx context.Context, conn *sql.Conn, t
 
 // buildMSSQLMergeWithTablock generates a MERGE statement with TABLOCK hint.
 // TABLOCK prevents S->X lock conversion deadlocks that are common with MERGE.
-func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, pkCols []string) string {
+// colTypes is used to skip geography/geometry columns from change detection
+// (SQL Server doesn't support comparison operators on spatial types).
+func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, colTypes, pkCols []string) string {
 	// Build ON clause (PK join condition)
 	var onClauses []string
 	for _, pk := range pkCols {
@@ -618,10 +622,22 @@ func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, pkCols [
 
 	var setClauses []string
 	var changeDetection []string
-	for _, col := range cols {
+	for i, col := range cols {
 		if !pkSet[col] {
 			quotedCol := quoteMSSQLIdent(col)
 			setClauses = append(setClauses, fmt.Sprintf("%s = source.%s", quotedCol, quotedCol))
+
+			// Get column type (lowercase for comparison)
+			colType := ""
+			if i < len(colTypes) {
+				colType = strings.ToLower(colTypes[i])
+			}
+
+			// Skip geography/geometry from change detection - SQL Server doesn't support <> on spatial types
+			if colType == "geography" || colType == "geometry" {
+				continue
+			}
+
 			// NULL-safe change detection for MSSQL
 			changeDetection = append(changeDetection, fmt.Sprintf(
 				"(target.%s <> source.%s OR "+

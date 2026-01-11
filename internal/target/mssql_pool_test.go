@@ -83,18 +83,21 @@ func TestSafeMSSQLStagingName(t *testing.T) {
 
 func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 	tests := []struct {
-		name         string
-		targetTable  string
-		stagingTable string
-		cols         []string
-		pkCols       []string
-		wantContains []string
+		name            string
+		targetTable     string
+		stagingTable    string
+		cols            []string
+		colTypes        []string
+		pkCols          []string
+		wantContains    []string
+		wantNotContains []string
 	}{
 		{
 			name:         "basic merge",
 			targetTable:  "[dbo].[users]",
 			stagingTable: "#stg_users_w0",
 			cols:         []string{"id", "name", "email"},
+			colTypes:     []string{"int", "nvarchar", "nvarchar"},
 			pkCols:       []string{"id"},
 			wantContains: []string{
 				"MERGE INTO",
@@ -114,6 +117,7 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			targetTable:  "[sales].[order_items]",
 			stagingTable: "#stg_order_items_w1",
 			cols:         []string{"order_id", "item_id", "quantity", "price"},
+			colTypes:     []string{"int", "int", "int", "decimal"},
 			pkCols:       []string{"order_id", "item_id"},
 			wantContains: []string{
 				"target.[order_id] = source.[order_id]",
@@ -127,6 +131,7 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			targetTable:  "[dbo].[data]",
 			stagingTable: "#stg_data_w0",
 			cols:         []string{"id", "value"},
+			colTypes:     []string{"int", "nvarchar"},
 			pkCols:       []string{"id"},
 			wantContains: []string{
 				"target.[value] <> source.[value]",
@@ -134,15 +139,52 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 				"target.[value] IS NOT NULL AND source.[value] IS NULL",
 			},
 		},
+		{
+			name:         "geography column excluded from change detection",
+			targetTable:  "[sales].[customers]",
+			stagingTable: "#stg_customers_w0",
+			cols:         []string{"id", "name", "location"},
+			colTypes:     []string{"int", "nvarchar", "geography"},
+			pkCols:       []string{"id"},
+			wantContains: []string{
+				"[location] = source.[location]", // geography is updated
+				"target.[name] <> source.[name]", // name has change detection
+			},
+			wantNotContains: []string{
+				"target.[location] <> source.[location]", // geography NOT in change detection
+			},
+		},
+		{
+			name:         "geometry column excluded from change detection",
+			targetTable:  "[dbo].[shapes]",
+			stagingTable: "#stg_shapes_w0",
+			cols:         []string{"id", "shape", "label"},
+			colTypes:     []string{"int", "geometry", "nvarchar"},
+			pkCols:       []string{"id"},
+			wantContains: []string{
+				"[shape] = source.[shape]", // geometry is updated
+				"target.[label] <> source.[label]", // label has change detection
+			},
+			wantNotContains: []string{
+				"target.[shape] <> source.[shape]", // geometry NOT in change detection
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildMSSQLMergeWithTablock(tt.targetTable, tt.stagingTable, tt.cols, tt.pkCols)
+			got := buildMSSQLMergeWithTablock(tt.targetTable, tt.stagingTable, tt.cols, tt.colTypes, tt.pkCols)
 
 			for _, want := range tt.wantContains {
 				if !strings.Contains(got, want) {
 					t.Errorf("buildMSSQLMergeWithTablock() missing %q\nGot: %s", want, got)
+				}
+			}
+
+			// Check that unwanted strings are NOT present
+			for _, notWant := range tt.wantNotContains {
+				if strings.Contains(got, notWant) {
+					t.Errorf("buildMSSQLMergeWithTablock() should NOT contain %q\nGot: %s", notWant, got)
 				}
 			}
 
