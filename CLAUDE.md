@@ -256,6 +256,30 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ## Session History
 
+### Session 12: SRID Hardcoding Fix (Claude - January 11, 2026)
+1. Addressed remaining SRID hardcoding issue from Gemini CLI review (PR #47):
+   - Previous implementation hardcoded SRID 4326 (WGS84) for all geography/geometry conversions
+   - PostGIS columns with custom SRIDs (e.g., NAD83, Web Mercator) would be incorrectly converted
+2. Added SRID field to Column struct (`internal/source/schema.go`):
+   - New `SRID int` field stores spatial reference ID for geography/geometry columns
+3. Query SRID from PostGIS metadata (`internal/source/postgres_pool.go`):
+   - Added `loadSpatialSRIDs()` function
+   - Queries `geometry_columns` and `geography_columns` views during schema extraction
+   - Gracefully handles missing PostGIS (SRID remains 0)
+4. Pass SRID through transfer pipeline:
+   - Added `colSRIDs []int` parameter to `UpsertChunkWithWriter` interface
+   - Updated `executeKeysetPagination`, `executeRowNumberPagination`, `writeChunkUpsertWithWriter`
+   - SRID values parallel to colTypes array
+5. Updated `buildMSSQLMergeWithTablock()`:
+   - `SpatialColumn` struct now includes `SRID int` field
+   - Uses actual SRID from source in `STGeomFromText(source.col, SRID)`
+   - Defaults to 4326 only when SRID is 0 (unset)
+6. Added unit tests for custom SRID handling:
+   - Test for SRID 2163 (NAD83 / US National Atlas Equal Area)
+   - Test for SRID 3857 (Web Mercator)
+   - Test for SRID 0 fallback to default 4326
+7. All CI checks passed, PR merged to main
+
 ### Session 11: Security & Correctness Fixes (Claude - January 11, 2026)
 1. Ran Gemini CLI code review on codebase - identified security vulnerabilities
 2. Fixed DSN injection vulnerabilities (PR #46):
