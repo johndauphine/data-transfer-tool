@@ -358,13 +358,12 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 		sb.WriteString("The target column must be able to store these exact values.\n")
 	}
 
-	// Add target database constraints before the instruction
+	// Add target database context
 	switch info.TargetDBType {
 	case "postgres":
-		sb.WriteString("\nIMPORTANT: Target is standard PostgreSQL WITHOUT PostGIS.\n")
-		sb.WriteString("The following types DO NOT EXIST: geometry, geography, hstore.\n")
+		sb.WriteString("\nTarget: Standard PostgreSQL (no extensions installed).\n")
 	case "mssql":
-		sb.WriteString("\nTarget is SQL Server with full native type support including spatial types.\n")
+		sb.WriteString("\nTarget: SQL Server with full native type support.\n")
 	}
 
 	sb.WriteString("\nReturn ONLY the ")
