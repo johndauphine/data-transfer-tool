@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,18 +29,10 @@ type PgxSourcePool struct {
 
 // NewPgxSourcePool creates a new PostgreSQL source connection pool using pgx.
 func NewPgxSourcePool(cfg *config.SourceConfig, maxConns int) (*PgxSourcePool, error) {
-	// Build connection string with proper URL encoding for special characters in password
-	u := url.URL{
-		Scheme: "postgres",
-		User:   url.UserPassword(cfg.User, cfg.Password),
-		Host:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Path:   "/" + cfg.Database,
-	}
-	q := u.Query()
-	q.Set("sslmode", cfg.SSLMode)
-	u.RawQuery = q.Encode()
+	// Build DSN using dialect to eliminate duplication with target pool
+	dsn := pgDialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 
-	poolConfig, err := pgxpool.ParseConfig(u.String())
+	poolConfig, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parsing connection config: %w", err)
 	}
@@ -65,7 +56,7 @@ func NewPgxSourcePool(cfg *config.SourceConfig, maxConns int) (*PgxSourcePool, e
 
 	// Create sql.DB wrapper for compatibility
 	// Use the same connection string for both pools to ensure consistency
-	db, err := sql.Open("pgx", u.String())
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("creating sql.DB wrapper: %w", err)

@@ -33,8 +33,8 @@ type Pool struct {
 // NewPool creates a new PostgreSQL connection pool
 // sourceType indicates the source database type ("mssql" or "postgres") for DDL generation
 func NewPool(cfg *config.TargetConfig, maxConns int, sourceType string) (*Pool, error) {
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, cfg.SSLMode)
+	// Build DSN using dialect to eliminate duplication with source pool
+	dsn := pgDialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {

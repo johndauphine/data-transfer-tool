@@ -173,6 +173,44 @@ type TargetConfig struct {
 	GSSEncMode string `yaml:"gssencmode"` // PostgreSQL GSSAPI encryption: disable, prefer, require (default: prefer)
 }
 
+// DSNOptions returns a map of options for building a DSN via dialect.BuildDSN.
+// This consolidates the DSN option handling between source and target configs.
+func (c *SourceConfig) DSNOptions() map[string]any {
+	opts := make(map[string]any)
+	if c.SSLMode != "" {
+		opts["sslmode"] = c.SSLMode
+	}
+	if c.Encrypt != nil {
+		opts["encrypt"] = *c.Encrypt
+	}
+	if c.TrustServerCert {
+		opts["trustServerCertificate"] = true
+	}
+	if c.PacketSize > 0 {
+		opts["packetSize"] = c.PacketSize
+	}
+	return opts
+}
+
+// DSNOptions returns a map of options for building a DSN via dialect.BuildDSN.
+// This consolidates the DSN option handling between source and target configs.
+func (c *TargetConfig) DSNOptions() map[string]any {
+	opts := make(map[string]any)
+	if c.SSLMode != "" {
+		opts["sslmode"] = c.SSLMode
+	}
+	if c.Encrypt != nil {
+		opts["encrypt"] = *c.Encrypt
+	}
+	if c.TrustServerCert {
+		opts["trustServerCertificate"] = true
+	}
+	if c.PacketSize > 0 {
+		opts["packetSize"] = c.PacketSize
+	}
+	return opts
+}
+
 // MigrationConfig holds migration behavior settings
 type MigrationConfig struct {
 	MaxConnections         int      `yaml:"max_connections"`       // Deprecated: use max_mssql_connections and max_pg_connections

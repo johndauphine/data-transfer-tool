@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
 	"time"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
@@ -37,28 +36,8 @@ type Pool struct {
 
 // NewPool creates a new MSSQL connection pool
 func NewPool(cfg *config.SourceConfig, maxConns int) (*Pool, error) {
-	encryptStr := "false"
-	if cfg.Encrypt != nil && *cfg.Encrypt {
-		encryptStr = "true"
-	}
-	trustCert := "false"
-	if cfg.TrustServerCert {
-		trustCert = "true"
-	}
-
-	// URL-encode values that may contain special characters to prevent DSN injection
-	// Use QueryEscape for user/password to encode @ and : which are reserved in userinfo
-	encodedUser := url.QueryEscape(cfg.User)
-	encodedPass := url.QueryEscape(cfg.Password)
-	encodedDB := url.QueryEscape(cfg.Database)
-
-	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
-		encodedUser, encodedPass, cfg.Host, cfg.Port, encodedDB, encryptStr, trustCert)
-
-	// Add packet size for better throughput (default 4KB is too small)
-	if cfg.PacketSize > 0 {
-		dsn += fmt.Sprintf("&packet+size=%d", cfg.PacketSize)
-	}
+	// Build DSN using dialect to eliminate duplication with target pool
+	dsn := mssqlDialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 
 	db, err := sql.Open("sqlserver", dsn)
 	if err != nil {
