@@ -349,6 +349,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Load additional metadata if enabled
+	aiMappingEnabled := o.config.Migration.AITypeMapping != nil && o.config.Migration.AITypeMapping.Enabled
 	for i := range tables {
 		t := &tables[i]
 
@@ -367,6 +368,24 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		if o.config.Migration.CreateCheckConstraints {
 			if err := o.sourcePool.LoadCheckConstraints(ctx, t); err != nil {
 				logging.Warn("Warning: loading check constraints for %s: %v", t.Name, err)
+			}
+		}
+
+		// Sample column values for AI type mapping context
+		if aiMappingEnabled {
+			sampleCount := 0
+			for j := range t.Columns {
+				col := &t.Columns[j]
+				samples, err := o.sourcePool.SampleColumnValues(ctx, t.Schema, t.Name, col.Name, 5)
+				if err != nil {
+					logging.Debug("Sampling column %s.%s: %v", t.Name, col.Name, err)
+				} else if len(samples) > 0 {
+					col.SampleValues = samples
+					sampleCount++
+				}
+			}
+			if sampleCount > 0 {
+				logging.Info("AI Type Mapping: sampled %d columns from %s for type inference context", sampleCount, t.Name)
 			}
 		}
 	}

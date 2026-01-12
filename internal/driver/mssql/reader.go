@@ -321,6 +321,43 @@ func (r *Reader) GetDateColumnInfo(ctx context.Context, schema, table string, ca
 	return "", "", false
 }
 
+// SampleColumnValues retrieves sample values from a column for AI type mapping context.
+func (r *Reader) SampleColumnValues(ctx context.Context, schema, table, column string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+
+	// Query distinct non-null values with TOP
+	query := fmt.Sprintf(`
+		SELECT DISTINCT TOP (@limit) CAST(%s AS NVARCHAR(MAX)) AS sample_val
+		FROM %s
+		WHERE %s IS NOT NULL
+	`, r.dialect.QuoteIdentifier(column), r.dialect.QualifyTable(schema, table), r.dialect.QuoteIdentifier(column))
+
+	rows, err := r.db.QueryContext(ctx, query, sql.Named("limit", limit))
+	if err != nil {
+		return nil, fmt.Errorf("sampling column %s: %w", column, err)
+	}
+	defer rows.Close()
+
+	var samples []string
+	for rows.Next() {
+		var val sql.NullString
+		if err := rows.Scan(&val); err != nil {
+			return nil, fmt.Errorf("scanning sample value: %w", err)
+		}
+		if val.Valid {
+			samples = append(samples, val.String)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading samples: %w", err)
+	}
+
+	return samples, nil
+}
+
 // ReadTable reads data from a table and returns batches via a channel.
 func (r *Reader) ReadTable(ctx context.Context, opts driver.ReadOptions) (<-chan driver.Batch, error) {
 	batches := make(chan driver.Batch, 4) // Buffer a few batches

@@ -545,3 +545,41 @@ func (r *Reader) GetDateColumnInfo(ctx context.Context, schema, table string, ca
 	}
 	return "", "", false
 }
+
+// SampleColumnValues retrieves sample values from a column for AI type mapping context.
+func (r *Reader) SampleColumnValues(ctx context.Context, schema, table, column string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+
+	// Query distinct non-null values with LIMIT
+	query := fmt.Sprintf(`
+		SELECT DISTINCT %s::text AS sample_val
+		FROM %s
+		WHERE %s IS NOT NULL
+		LIMIT $1
+	`, r.dialect.QuoteIdentifier(column), r.dialect.QualifyTable(schema, table), r.dialect.QuoteIdentifier(column))
+
+	rows, err := r.sqlDB.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("sampling column %s: %w", column, err)
+	}
+	defer rows.Close()
+
+	var samples []string
+	for rows.Next() {
+		var val sql.NullString
+		if err := rows.Scan(&val); err != nil {
+			return nil, fmt.Errorf("scanning sample value: %w", err)
+		}
+		if val.Valid {
+			samples = append(samples, val.String)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading samples: %w", err)
+	}
+
+	return samples, nil
+}

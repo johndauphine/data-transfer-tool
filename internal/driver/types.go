@@ -98,15 +98,16 @@ func (t *Table) GetColumnNames() []string {
 
 // Column represents a table column.
 type Column struct {
-	Name       string `json:"name"`
-	DataType   string `json:"data_type"`
-	MaxLength  int    `json:"max_length"`
-	Precision  int    `json:"precision"`
-	Scale      int    `json:"scale"`
-	IsNullable bool   `json:"is_nullable"`
-	IsIdentity bool   `json:"is_identity"`
-	OrdinalPos int    `json:"ordinal_position"`
-	SRID       int    `json:"srid,omitempty"` // Spatial Reference ID for geography/geometry columns (0 = default/unset)
+	Name         string   `json:"name"`
+	DataType     string   `json:"data_type"`
+	MaxLength    int      `json:"max_length"`
+	Precision    int      `json:"precision"`
+	Scale        int      `json:"scale"`
+	IsNullable   bool     `json:"is_nullable"`
+	IsIdentity   bool     `json:"is_identity"`
+	OrdinalPos   int      `json:"ordinal_position"`
+	SRID         int      `json:"srid,omitempty"`         // Spatial Reference ID for geography/geometry columns (0 = default/unset)
+	SampleValues []string `json:"sample_values,omitempty"` // Sample data values for AI type mapping context
 }
 
 // IsIntegerType returns true if the column is an integer type.

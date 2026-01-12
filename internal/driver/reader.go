@@ -29,6 +29,9 @@ type Reader interface {
 	GetPartitionBoundaries(ctx context.Context, t *Table, numPartitions int) ([]Partition, error)
 	GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool)
 
+	// Data sampling for AI type mapping
+	SampleColumnValues(ctx context.Context, schema, table, column string, limit int) ([]string, error)
+
 	// Pool info
 	MaxConns() int
 	DBType() string

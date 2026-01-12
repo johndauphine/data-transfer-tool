@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -223,6 +224,95 @@ func TestAITypeMapper_BuildPrompt(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(prompt), []byte("Scale: 2")) {
 		t.Error("prompt should contain scale")
+	}
+}
+
+func TestAITypeMapper_BuildPromptWithSamples(t *testing.T) {
+	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
+		Enabled:  true,
+		Provider: "claude",
+		APIKey:   "test-key",
+	})
+
+	info := TypeInfo{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		DataType:     "geography",
+		MaxLength:    -1,
+		SampleValues: []string{
+			"POINT (-108.5523153 39.0430375)",
+			"POINT (-122.4194 37.7749)",
+			"POINT (-73.935242 40.730610)",
+		},
+	}
+
+	prompt := mapper.buildPrompt(info)
+
+	// Check that prompt contains sample values section
+	if !bytes.Contains([]byte(prompt), []byte("Sample values from source data:")) {
+		t.Error("prompt should contain sample values header")
+	}
+	if !bytes.Contains([]byte(prompt), []byte("POINT (-108.5523153 39.0430375)")) {
+		t.Error("prompt should contain sample GPS coordinate data")
+	}
+	if !bytes.Contains([]byte(prompt), []byte("geography")) {
+		t.Error("prompt should contain data type")
+	}
+}
+
+func TestAITypeMapper_BuildPromptTruncatesLongSamples(t *testing.T) {
+	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
+		Enabled:  true,
+		Provider: "claude",
+		APIKey:   "test-key",
+	})
+
+	// Create a long sample value (over 100 chars)
+	longValue := strings.Repeat("x", 150)
+
+	info := TypeInfo{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		DataType:     "nvarchar",
+		MaxLength:    -1,
+		SampleValues: []string{longValue},
+	}
+
+	prompt := mapper.buildPrompt(info)
+
+	// Check that long value is truncated with "..."
+	if !bytes.Contains([]byte(prompt), []byte("...")) {
+		t.Error("prompt should truncate long sample values")
+	}
+	// Original 150-char value should NOT appear in full
+	if bytes.Contains([]byte(prompt), []byte(longValue)) {
+		t.Error("prompt should not contain full long value")
+	}
+}
+
+func TestAITypeMapper_BuildPromptLimitsToFiveSamples(t *testing.T) {
+	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
+		Enabled:  true,
+		Provider: "claude",
+		APIKey:   "test-key",
+	})
+
+	info := TypeInfo{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		DataType:     "int",
+		SampleValues: []string{"1", "2", "3", "4", "5", "6", "7", "8"},
+	}
+
+	prompt := mapper.buildPrompt(info)
+
+	// Count occurrences of sample values in the prompt
+	// Should have at most 5 (values 1-5) but not 6, 7, 8
+	if bytes.Contains([]byte(prompt), []byte("\"6\"")) {
+		t.Error("prompt should not contain 6th sample")
+	}
+	if bytes.Contains([]byte(prompt), []byte("\"7\"")) {
+		t.Error("prompt should not contain 7th sample")
 	}
 }
 

@@ -33,6 +33,10 @@ type TypeInfo struct {
 
 	// Scale is the numeric scale.
 	Scale int
+
+	// SampleValues contains sample data values from the source column.
+	// Used by AI mapper to provide context for better type mapping decisions.
+	SampleValues []string
 }
 
 // ChainedTypeMapper tries multiple mappers in order until one succeeds.

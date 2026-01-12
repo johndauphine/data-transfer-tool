@@ -128,8 +128,12 @@ func (m *AITypeMapper) MapType(info TypeInfo) string {
 		logging.Warn("Failed to save AI type mapping cache: %v", err)
 	}
 
-	logging.Info("AI mapped %s.%s -> %s.%s: %s",
-		info.SourceDBType, info.DataType, info.TargetDBType, result, "(cached for future use)")
+	sampleInfo := ""
+	if len(info.SampleValues) > 0 {
+		sampleInfo = fmt.Sprintf(" (with %d sample values)", len(info.SampleValues))
+	}
+	logging.Info("AI mapped %s.%s -> %s.%s%s (cached for future use)",
+		info.SourceDBType, info.DataType, info.TargetDBType, result, sampleInfo)
 
 	return result
 }
@@ -207,6 +211,23 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 	if info.Scale > 0 {
 		sb.WriteString(fmt.Sprintf("- Scale: %d\n", info.Scale))
 	}
+
+	// Include sample values if available for better context
+	if len(info.SampleValues) > 0 {
+		sb.WriteString("\nSample values from source data:\n")
+		for i, v := range info.SampleValues {
+			if i >= 5 { // Limit to 5 samples in prompt
+				break
+			}
+			// Truncate long values
+			display := v
+			if len(display) > 100 {
+				display = display[:100] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("  - %q\n", display))
+		}
+	}
+
 	sb.WriteString("\nReturn ONLY the equivalent ")
 	sb.WriteString(info.TargetDBType)
 	sb.WriteString(" type with appropriate size/precision.\n")

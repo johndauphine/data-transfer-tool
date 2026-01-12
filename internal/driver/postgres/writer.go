@@ -194,6 +194,7 @@ func (w *Writer) generateDDL(t *driver.Table, targetSchema string, unlogged bool
 			MaxLength:    col.MaxLength,
 			Precision:    col.Precision,
 			Scale:        col.Scale,
+			SampleValues: col.SampleValues,
 		}
 		pgType := w.typeMapper.MapType(typeInfo)
 
