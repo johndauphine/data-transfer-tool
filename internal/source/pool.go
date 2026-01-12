@@ -32,6 +32,7 @@ type Pool struct {
 	db       *sql.DB
 	config   *config.SourceConfig
 	maxConns int
+	strategy *MSSQLStrategy
 }
 
 // NewPool creates a new MSSQL connection pool
@@ -75,7 +76,7 @@ func NewPool(cfg *config.SourceConfig, maxConns int) (*Pool, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	return &Pool{db: db, config: cfg, maxConns: maxConns}, nil
+	return &Pool{db: db, config: cfg, maxConns: maxConns, strategy: NewMSSQLStrategy()}, nil
 }
 
 // Close closes all connections in the pool
@@ -120,17 +121,7 @@ func (p *Pool) GetRowCount(ctx context.Context, schema, table string) (int64, er
 
 // ExtractSchema extracts table metadata from the source database
 func (p *Pool) ExtractSchema(ctx context.Context, schema string) ([]Table, error) {
-	query := `
-		SELECT
-			t.TABLE_SCHEMA,
-			t.TABLE_NAME
-		FROM INFORMATION_SCHEMA.TABLES t
-		WHERE t.TABLE_TYPE = 'BASE TABLE'
-		  AND t.TABLE_SCHEMA = @schema
-		ORDER BY t.TABLE_NAME
-	`
-
-	rows, err := p.db.QueryContext(ctx, query, sql.Named("schema", schema))
+	rows, err := p.db.QueryContext(ctx, p.strategy.GetTablesQuery(), p.strategy.BindTableParams(schema, "")...)
 	if err != nil {
 		return nil, fmt.Errorf("querying tables: %w", err)
 	}
@@ -168,24 +159,7 @@ func (p *Pool) ExtractSchema(ctx context.Context, schema string) ([]Table, error
 }
 
 func (p *Pool) loadColumns(ctx context.Context, t *Table) error {
-	query := `
-		SELECT
-			COLUMN_NAME,
-			DATA_TYPE,
-			ISNULL(CHARACTER_MAXIMUM_LENGTH, 0),
-			ISNULL(NUMERIC_PRECISION, 0),
-			ISNULL(NUMERIC_SCALE, 0),
-			CASE WHEN IS_NULLABLE = 'YES' THEN 1 ELSE 0 END,
-			COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity'),
-			ORDINAL_POSITION
-		FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table
-		ORDER BY ORDINAL_POSITION
-	`
-
-	rows, err := p.db.QueryContext(ctx, query,
-		sql.Named("schema", t.Schema),
-		sql.Named("table", t.Name))
+	rows, err := p.db.QueryContext(ctx, p.strategy.GetColumnsQuery(), p.strategy.BindColumnParams(t.Schema, t.Name)...)
 	if err != nil {
 		return err
 	}
@@ -204,22 +178,7 @@ func (p *Pool) loadColumns(ctx context.Context, t *Table) error {
 }
 
 func (p *Pool) loadPrimaryKey(ctx context.Context, t *Table) error {
-	query := `
-		SELECT c.COLUMN_NAME
-		FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-		JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE c
-			ON c.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
-			AND c.TABLE_SCHEMA = tc.TABLE_SCHEMA
-			AND c.TABLE_NAME = tc.TABLE_NAME
-		WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-		  AND tc.TABLE_SCHEMA = @schema
-		  AND tc.TABLE_NAME = @table
-		ORDER BY c.ORDINAL_POSITION
-	`
-
-	rows, err := p.db.QueryContext(ctx, query,
-		sql.Named("schema", t.Schema),
-		sql.Named("table", t.Name))
+	rows, err := p.db.QueryContext(ctx, p.strategy.GetPrimaryKeyQuery(), p.strategy.BindPKParams(t.Schema, t.Name)...)
 	if err != nil {
 		return err
 	}
@@ -298,30 +257,7 @@ func (p *Pool) GetPartitionBoundaries(ctx context.Context, t *Table, numPartitio
 
 // LoadIndexes loads all non-PK indexes for a table
 func (p *Pool) LoadIndexes(ctx context.Context, t *Table) error {
-	query := `
-		SELECT
-			i.name AS index_name,
-			i.is_unique,
-			i.type_desc,
-			STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS columns,
-			ISNULL(STRING_AGG(CASE WHEN ic.is_included_column = 1 THEN c.name END, ',')
-				WITHIN GROUP (ORDER BY ic.key_ordinal), '') AS include_columns
-		FROM sys.indexes i
-		JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-		JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-		JOIN sys.tables tb ON i.object_id = tb.object_id
-		JOIN sys.schemas s ON tb.schema_id = s.schema_id
-		WHERE s.name = @schema
-		  AND tb.name = @table
-		  AND i.is_primary_key = 0  -- Exclude PK
-		  AND i.type > 0  -- Exclude heaps
-		GROUP BY i.name, i.is_unique, i.type_desc
-		ORDER BY i.name
-	`
-
-	rows, err := p.db.QueryContext(ctx, query,
-		sql.Named("schema", t.Schema),
-		sql.Named("table", t.Name))
+	rows, err := p.db.QueryContext(ctx, p.strategy.GetIndexesQuery(), p.strategy.BindIndexParams(t.Schema, t.Name)...)
 	if err != nil {
 		return err
 	}
@@ -346,31 +282,7 @@ func (p *Pool) LoadIndexes(ctx context.Context, t *Table) error {
 
 // LoadForeignKeys loads all foreign keys for a table
 func (p *Pool) LoadForeignKeys(ctx context.Context, t *Table) error {
-	query := `
-		SELECT
-			fk.name AS fk_name,
-			STRING_AGG(pc.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS parent_columns,
-			rs.name AS ref_schema,
-			rt.name AS ref_table,
-			STRING_AGG(rc.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS ref_columns,
-			fk.delete_referential_action_desc,
-			fk.update_referential_action_desc
-		FROM sys.foreign_keys fk
-		JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
-		JOIN sys.tables pt ON fk.parent_object_id = pt.object_id
-		JOIN sys.schemas ps ON pt.schema_id = ps.schema_id
-		JOIN sys.columns pc ON fkc.parent_object_id = pc.object_id AND fkc.parent_column_id = pc.column_id
-		JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
-		JOIN sys.schemas rs ON rt.schema_id = rs.schema_id
-		JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id
-		WHERE ps.name = @schema AND pt.name = @table
-		GROUP BY fk.name, rs.name, rt.name, fk.delete_referential_action_desc, fk.update_referential_action_desc
-		ORDER BY fk.name
-	`
-
-	rows, err := p.db.QueryContext(ctx, query,
-		sql.Named("schema", t.Schema),
-		sql.Named("table", t.Name))
+	rows, err := p.db.QueryContext(ctx, p.strategy.GetForeignKeysQuery(), p.strategy.BindFKParams(t.Schema, t.Name)...)
 	if err != nil {
 		return err
 	}
@@ -392,21 +304,7 @@ func (p *Pool) LoadForeignKeys(ctx context.Context, t *Table) error {
 
 // LoadCheckConstraints loads all check constraints for a table
 func (p *Pool) LoadCheckConstraints(ctx context.Context, t *Table) error {
-	query := `
-		SELECT
-			cc.name,
-			cc.definition
-		FROM sys.check_constraints cc
-		JOIN sys.tables tb ON cc.parent_object_id = tb.object_id
-		JOIN sys.schemas s ON tb.schema_id = s.schema_id
-		WHERE s.name = @schema AND tb.name = @table
-		  AND cc.is_disabled = 0
-		ORDER BY cc.name
-	`
-
-	rows, err := p.db.QueryContext(ctx, query,
-		sql.Named("schema", t.Schema),
-		sql.Named("table", t.Name))
+	rows, err := p.db.QueryContext(ctx, p.strategy.GetCheckConstraintsQuery(), p.strategy.BindCheckParams(t.Schema, t.Name)...)
 	if err != nil {
 		return err
 	}
@@ -430,31 +328,13 @@ func (p *Pool) GetDateColumnInfo(ctx context.Context, schema, table string, cand
 		return "", "", false
 	}
 
-	// Valid SQL Server temporal types for date-based incremental sync
-	validTypes := map[string]bool{
-		"datetime":       true,
-		"datetime2":      true,
-		"smalldatetime":  true,
-		"date":           true,
-		"datetimeoffset": true,
-	}
-
 	// Check each candidate in order
 	for _, candidate := range candidates {
-		query := `
-			SELECT DATA_TYPE
-			FROM INFORMATION_SCHEMA.COLUMNS
-			WHERE TABLE_SCHEMA = @schema
-			  AND TABLE_NAME = @table
-			  AND COLUMN_NAME = @column
-		`
 		var dt string
-		err := p.db.QueryRowContext(ctx, query,
-			sql.Named("schema", schema),
-			sql.Named("table", table),
-			sql.Named("column", candidate)).Scan(&dt)
+		err := p.db.QueryRowContext(ctx, p.strategy.GetDateColumnQuery(),
+			p.strategy.BindDateColumnParams(schema, table, candidate)...).Scan(&dt)
 
-		if err == nil && validTypes[strings.ToLower(dt)] {
+		if err == nil && p.strategy.IsValidDateType(strings.ToLower(dt)) {
 			return candidate, dt, true
 		}
 	}

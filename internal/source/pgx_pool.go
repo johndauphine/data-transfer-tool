@@ -25,6 +25,7 @@ type PgxSourcePool struct {
 	sqlDB    *sql.DB // Wrapper for compatibility with SourcePool interface
 	config   *config.SourceConfig
 	maxConns int
+	strategy *PostgresStrategy
 }
 
 // NewPgxSourcePool creates a new PostgreSQL source connection pool using pgx.
@@ -80,6 +81,7 @@ func NewPgxSourcePool(cfg *config.SourceConfig, maxConns int) (*PgxSourcePool, e
 		sqlDB:    db,
 		config:   cfg,
 		maxConns: maxConns,
+		strategy: NewPostgresStrategy(),
 	}, nil
 }
 
@@ -118,17 +120,7 @@ func (p *PgxSourcePool) GetRowCount(ctx context.Context, schema, table string) (
 
 // ExtractSchema extracts table metadata from the PostgreSQL source database
 func (p *PgxSourcePool) ExtractSchema(ctx context.Context, schema string) ([]Table, error) {
-	query := `
-		SELECT
-			table_schema,
-			table_name
-		FROM information_schema.tables
-		WHERE table_type = 'BASE TABLE'
-		  AND table_schema = $1
-		ORDER BY table_name
-	`
-
-	rows, err := p.pool.Query(ctx, query, schema)
+	rows, err := p.pool.Query(ctx, p.strategy.GetTablesQuery(), p.strategy.BindTableParams(schema, "")...)
 	if err != nil {
 		return nil, fmt.Errorf("querying tables: %w", err)
 	}
@@ -166,22 +158,7 @@ func (p *PgxSourcePool) ExtractSchema(ctx context.Context, schema string) ([]Tab
 }
 
 func (p *PgxSourcePool) loadColumns(ctx context.Context, t *Table) error {
-	query := `
-		SELECT
-			column_name,
-			udt_name,
-			COALESCE(character_maximum_length, 0),
-			COALESCE(numeric_precision, 0),
-			COALESCE(numeric_scale, 0),
-			CASE WHEN is_nullable = 'YES' THEN true ELSE false END,
-			CASE WHEN column_default LIKE 'nextval%' THEN true ELSE false END,
-			ordinal_position
-		FROM information_schema.columns
-		WHERE table_schema = $1 AND table_name = $2
-		ORDER BY ordinal_position
-	`
-
-	rows, err := p.pool.Query(ctx, query, t.Schema, t.Name)
+	rows, err := p.pool.Query(ctx, p.strategy.GetColumnsQuery(), p.strategy.BindColumnParams(t.Schema, t.Name)...)
 	if err != nil {
 		return err
 	}
@@ -200,19 +177,7 @@ func (p *PgxSourcePool) loadColumns(ctx context.Context, t *Table) error {
 }
 
 func (p *PgxSourcePool) loadPrimaryKey(ctx context.Context, t *Table) error {
-	query := `
-		SELECT a.attname
-		FROM pg_index i
-		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-		JOIN pg_class c ON c.oid = i.indrelid
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE i.indisprimary
-		  AND n.nspname = $1
-		  AND c.relname = $2
-		ORDER BY array_position(i.indkey, a.attnum)
-	`
-
-	rows, err := p.pool.Query(ctx, query, t.Schema, t.Name)
+	rows, err := p.pool.Query(ctx, p.strategy.GetPrimaryKeyQuery(), p.strategy.BindPKParams(t.Schema, t.Name)...)
 	if err != nil {
 		return err
 	}
@@ -293,27 +258,7 @@ func (p *PgxSourcePool) GetPartitionBoundaries(ctx context.Context, t *Table, nu
 
 // LoadIndexes loads all non-PK indexes for a table
 func (p *PgxSourcePool) LoadIndexes(ctx context.Context, t *Table) error {
-	query := `
-		SELECT
-			i.relname AS index_name,
-			ix.indisunique,
-			CASE WHEN am.amname = 'btree' AND ix.indisclustered THEN true ELSE false END,
-			array_to_string(array_agg(a.attname ORDER BY k.ordinality), ',') AS columns
-		FROM pg_index ix
-		JOIN pg_class i ON i.oid = ix.indexrelid
-		JOIN pg_class t ON t.oid = ix.indrelid
-		JOIN pg_namespace n ON n.oid = t.relnamespace
-		JOIN pg_am am ON am.oid = i.relam
-		CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ordinality)
-		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
-		WHERE n.nspname = $1
-		  AND t.relname = $2
-		  AND NOT ix.indisprimary
-		GROUP BY i.relname, ix.indisunique, am.amname, ix.indisclustered
-		ORDER BY i.relname
-	`
-
-	rows, err := p.pool.Query(ctx, query, t.Schema, t.Name)
+	rows, err := p.pool.Query(ctx, p.strategy.GetIndexesQuery(), p.strategy.BindIndexParams(t.Schema, t.Name)...)
 	if err != nil {
 		return err
 	}
@@ -334,44 +279,7 @@ func (p *PgxSourcePool) LoadIndexes(ctx context.Context, t *Table) error {
 
 // LoadForeignKeys loads all foreign keys for a table
 func (p *PgxSourcePool) LoadForeignKeys(ctx context.Context, t *Table) error {
-	query := `
-		SELECT
-			c.conname AS fk_name,
-			array_to_string(array_agg(a.attname ORDER BY array_position(c.conkey, a.attnum)), ',') AS parent_columns,
-			nf.nspname AS ref_schema,
-			tf.relname AS ref_table,
-			array_to_string(array_agg(af.attname ORDER BY array_position(c.confkey, af.attnum)), ',') AS ref_columns,
-			CASE c.confdeltype
-				WHEN 'a' THEN 'NO_ACTION'
-				WHEN 'r' THEN 'RESTRICT'
-				WHEN 'c' THEN 'CASCADE'
-				WHEN 'n' THEN 'SET_NULL'
-				WHEN 'd' THEN 'SET_DEFAULT'
-			END AS on_delete,
-			CASE c.confupdtype
-				WHEN 'a' THEN 'NO_ACTION'
-				WHEN 'r' THEN 'RESTRICT'
-				WHEN 'c' THEN 'CASCADE'
-				WHEN 'n' THEN 'SET_NULL'
-				WHEN 'd' THEN 'SET_DEFAULT'
-			END AS on_update
-		FROM pg_constraint c
-		JOIN pg_class t ON t.oid = c.conrelid
-		JOIN pg_namespace n ON n.oid = t.relnamespace
-		JOIN pg_class tf ON tf.oid = c.confrelid
-		JOIN pg_namespace nf ON nf.oid = tf.relnamespace
-		CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS ka(attnum, ord)
-		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ka.attnum
-		CROSS JOIN LATERAL unnest(c.confkey) WITH ORDINALITY AS kf(attnum, ord)
-		JOIN pg_attribute af ON af.attrelid = tf.oid AND af.attnum = kf.attnum AND ka.ord = kf.ord
-		WHERE c.contype = 'f'
-		  AND n.nspname = $1
-		  AND t.relname = $2
-		GROUP BY c.conname, nf.nspname, tf.relname, c.confdeltype, c.confupdtype
-		ORDER BY c.conname
-	`
-
-	rows, err := p.pool.Query(ctx, query, t.Schema, t.Name)
+	rows, err := p.pool.Query(ctx, p.strategy.GetForeignKeysQuery(), p.strategy.BindFKParams(t.Schema, t.Name)...)
 	if err != nil {
 		return err
 	}
@@ -393,20 +301,7 @@ func (p *PgxSourcePool) LoadForeignKeys(ctx context.Context, t *Table) error {
 
 // LoadCheckConstraints loads all check constraints for a table
 func (p *PgxSourcePool) LoadCheckConstraints(ctx context.Context, t *Table) error {
-	query := `
-		SELECT
-			c.conname,
-			pg_get_constraintdef(c.oid)
-		FROM pg_constraint c
-		JOIN pg_class t ON t.oid = c.conrelid
-		JOIN pg_namespace n ON n.oid = t.relnamespace
-		WHERE c.contype = 'c'
-		  AND n.nspname = $1
-		  AND t.relname = $2
-		ORDER BY c.conname
-	`
-
-	rows, err := p.pool.Query(ctx, query, t.Schema, t.Name)
+	rows, err := p.pool.Query(ctx, p.strategy.GetCheckConstraintsQuery(), p.strategy.BindCheckParams(t.Schema, t.Name)...)
 	if err != nil {
 		return err
 	}
@@ -430,29 +325,13 @@ func (p *PgxSourcePool) GetDateColumnInfo(ctx context.Context, schema, table str
 		return "", "", false
 	}
 
-	// Valid PostgreSQL temporal types for date-based incremental sync
-	validTypes := map[string]bool{
-		"timestamp":   true,
-		"timestamptz": true,
-		"date":        true,
-		// Internal type names (udt_name)
-		"timestamp without time zone": true,
-		"timestamp with time zone":    true,
-	}
-
 	// Check each candidate in order
 	for _, candidate := range candidates {
-		query := `
-			SELECT udt_name
-			FROM information_schema.columns
-			WHERE table_schema = $1
-			  AND table_name = $2
-			  AND column_name = $3
-		`
 		var dt string
-		err := p.pool.QueryRow(ctx, query, schema, table, candidate).Scan(&dt)
+		err := p.pool.QueryRow(ctx, p.strategy.GetDateColumnQuery(),
+			p.strategy.BindDateColumnParams(schema, table, candidate)...).Scan(&dt)
 
-		if err == nil && validTypes[strings.ToLower(dt)] {
+		if err == nil && p.strategy.IsValidDateType(strings.ToLower(dt)) {
 			return candidate, dt, true
 		}
 	}
