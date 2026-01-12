@@ -30,7 +30,7 @@ type DriverDefaults struct {
 	WriteAheadWriters int
 
 	// ScaleWritersWithCores indicates whether WriteAheadWriters should scale with CPU cores.
-	// If true, config.applyDefaults() will calculate: min(max(cores/4, 2), 4)
+	// If true, config.applyDefaults() will calculate: min(max(cores/4, WriteAheadWriters), 4)
 	// If false, WriteAheadWriters is used as-is.
 	// MSSQL: false (TABLOCK serializes writes, more writers = more contention)
 	// PostgreSQL: true (COPY handles parallelism well)

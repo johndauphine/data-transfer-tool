@@ -970,12 +970,17 @@ func (c *Config) DebugDump() string {
 	pgConnsExpl := fmt.Sprintf("%d workers * %d writers + 4", c.Migration.Workers, c.Migration.WriteAheadWriters)
 	b.WriteString(fmt.Sprintf("  MaxPgConnections: %s\n", formatAutoValue(c.Migration.MaxPgConnections, ac.OriginalMaxPgConns, pgConnsExpl)))
 
-	// WriteAheadWriters
+	// WriteAheadWriters - use driver defaults for explanation
 	var writersExpl string
-	if canonicalDriverName(c.Target.Type) == "mssql" {
-		writersExpl = "fixed 2 (MSSQL TABLOCK)"
+	if targetDriver, err := driver.Get(c.Target.Type); err == nil {
+		defaults := targetDriver.Defaults()
+		if defaults.ScaleWritersWithCores {
+			writersExpl = fmt.Sprintf("driver default scaled with cores (%d cores)", ac.CPUCores)
+		} else {
+			writersExpl = fmt.Sprintf("driver default fixed at %d", defaults.WriteAheadWriters)
+		}
 	} else {
-		writersExpl = fmt.Sprintf("cores/4 clamped 2-4, %d cores", ac.CPUCores)
+		writersExpl = "fallback default"
 	}
 	b.WriteString(fmt.Sprintf("  WriteAheadWriters: %s\n", formatAutoValue(c.Migration.WriteAheadWriters, ac.OriginalWriteAheadWriters, writersExpl)))
 
