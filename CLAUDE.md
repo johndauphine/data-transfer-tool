@@ -111,11 +111,11 @@ examples/                   # Example configuration files
 
 ### Latest Commits
 ```
-b065b73 feat: update factory to use driver registry for validation (Phase 5)
-70b6a09 feat: add pipeline package for Reader → Writer orchestration (Phase 4)
-2d82ebf feat: add MSSQL driver package (Phase 3 of pluggable architecture)
-e9370b9 feat: add PostgreSQL driver package (Phase 2 of pluggable architecture)
-391cc0e chore: bump version to 1.41.0
+bdcf722 Merge pull request #60 - make factory truly pluggable with driver registry
+8b3d481 fix: BuildRowNumberQuery CTE and PostgreSQL identifier sanitization
+1ead244 Merge pull request #59 - break config-driver circular import
+0a55d09 Merge pull request #58 - use driver registry for config validation
+fe7fcde docs: update CLAUDE.md with Session 14
 ```
 
 ### Major Features
@@ -281,6 +281,34 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Log warnings but continue for non-fatal issues
 
 ## Session History
+
+### Session 15: Pluggable Factory & BuildRowNumberQuery Fix (Claude - January 12, 2026)
+1. **PR #60 - Make Factory Truly Pluggable**:
+   - Addressed Codex feedback: factory still had switch statements on mssql/postgres
+   - Refactored `pool/factory.go` to call `d.NewReader()` and `d.NewWriter()` directly
+   - No switch statements - adding new driver requires zero changes to factory
+   - Made `source.Table`, `source.Column` type aliases for `driver.*` types
+   - Made `pool.SourcePool`, `pool.TargetPool` type aliases for `driver.Reader`, `driver.Writer`
+   - Added `ExecRaw()` and `QueryRowRaw()` to Writer interface for raw SQL operations
+   - Refactored transfer.go and validator.go to use `DBType()` checks instead of type assertions
+2. **BuildRowNumberQuery CTE Fix**:
+   - Critical bug: outer SELECT in CTE used full expressions like `[Col].STAsText() AS [Col]`
+   - CTE only exposes aliases, not original expressions - caused "column not found" errors
+   - Added `extractColumnAliases()` function to parse column aliases for outer SELECT
+   - Fixed in: `driver/mssql/dialect.go`, `driver/postgres/dialect.go`, `dialect/dialect.go`
+3. **PostgreSQL Identifier Sanitization**:
+   - New `driver/postgres/writer.go` wasn't sanitizing identifiers like old code path
+   - Added `sanitizePGIdentifier()` function (lowercase, replace special chars)
+   - Updated all DDL methods: generateDDL, DropTable, TruncateTable, CreatePrimaryKey, etc.
+   - Ensures consistency between DDL generation and data transfer
+4. Test results (WWI MSSQL→PG):
+   - 9/9 tables migrated successfully
+   - 701,604 rows at 269K rows/sec
+   - Customers table (663 rows with geography) transferred correctly
+5. Reviews:
+   - Copilot: Approved, no comments (reviewed 13/18 files)
+   - Codex: Found false positive (WriteBatch sanitization) - caller sanitizes in transfer.go
+6. Released v2.1.0
 
 ### Session 14: Config-Driver Circular Import Fix (Claude - January 12, 2026)
 1. Addressed remaining pluggable driver blockers identified by Codex review:
