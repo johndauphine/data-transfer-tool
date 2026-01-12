@@ -369,11 +369,11 @@ sensor = PythonSensor(
 
 ## Performance
 
-- **148K-524K rows/sec** depending on direction and mode
-- **MSSQL → MSSQL**: 485-524K rows/sec (32KB TDS packets)
-- **PG → PG**: 472K rows/sec (fastest, COPY both ends)
-- **MSSQL → PG**: 400-432K rows/sec (32KB packets + COPY protocol)
-- **PG → MSSQL**: 196K rows/sec (TDS bulk copy)
+- **222K-645K rows/sec** depending on direction and mode
+- **PG → MSSQL**: 645K rows/sec (PG streaming + TDS bulk copy)
+- **PG → PG**: 563K rows/sec (COPY protocol both ends)
+- **MSSQL → PG**: 248K rows/sec (32KB TDS packets + COPY)
+- **MSSQL → MSSQL**: 222K rows/sec (TDS both ends)
 - **Auto-tuning** based on CPU cores and available RAM
 - **2-6x faster** than equivalent Python/Airflow solutions
 
@@ -1181,30 +1181,30 @@ Serial/identity columns are mapped to `IDENTITY(1,1)` with proper seed reset.
 
 ## Benchmarks
 
-### Test Environment
-- **Hardware**: MacBook Pro M3 Max, 36GB RAM, 14 cores
-- **Dataset**: Stack Overflow 2010 (19.3M rows, 9 tables)
+### Test Environment (v2.1.0)
+- **Hardware**: WSL2 on Windows, 32GB RAM, 16 cores
+- **Dataset**: WideWorldImporters Sales (701K rows, 9 tables)
 - **Databases**: PostgreSQL 15 and SQL Server 2022 (both in Docker)
 
 ### Complete Benchmark Matrix
 
-All migration directions with both target modes:
+All migration directions with drop_recreate mode:
 
-| Direction | drop_recreate | upsert |
-|-----------|---------------|--------|
-| **MSSQL → MSSQL** | 485-524K rows/sec | 349-368K rows/sec |
-| **PG → PG** | 472K rows/sec | 337K rows/sec |
-| **MSSQL → PG** | 400-432K rows/sec | 261-272K rows/sec |
-| **PG → MSSQL** | 196K rows/sec | 148K rows/sec |
+| Direction | Transfer | Overall |
+|-----------|----------|---------|
+| **PG → MSSQL** | 688K rows/sec | **645K rows/sec** |
+| **PG → PG** | 605K rows/sec | **563K rows/sec** |
+| **MSSQL → PG** | 302K rows/sec | 248K rows/sec |
+| **MSSQL → MSSQL** | 280K rows/sec | 222K rows/sec |
 
-*Note: MSSQL source performance improved significantly in v1.43.0 with 32KB TDS packet size (default).*
+*Note: v2.1.0 introduced pluggable driver architecture with no performance regression. 32KB TDS packet size enabled by default.*
 
 ### Key Observations
 
-- **MSSQL → MSSQL** is now fastest with 32KB TDS packets on both ends
+- **PG → MSSQL** is fastest due to efficient PG streaming + TDS bulk copy
 - **PG → PG** uses COPY protocol on both ends for excellent throughput
-- **MSSQL → PG** benefits from 32KB packets + PostgreSQL COPY protocol
-- **Upsert overhead**: 25-35% slower than drop_recreate depending on direction
+- **MSSQL source** directions are slower due to TDS protocol read overhead
+- **Cold start impact**: First run after container start may be 5-10x slower
 
 Performance varies based on:
 - Network latency between source and target
@@ -1216,7 +1216,7 @@ Performance varies based on:
 
 | Feature | mssql-pg-migrate (Go) | Airflow DAG (Python) |
 |---------|----------------------|---------------------|
-| Throughput | 79-472K rows/sec | ~50-80k rows/sec |
+| Throughput | 222-645K rows/sec | ~50-80k rows/sec |
 | Memory usage | ~50MB | ~200-400MB |
 | Resume granularity | Chunk-level | Partition-level |
 | Dependencies | None (single binary) | Python, Airflow, etc. |
