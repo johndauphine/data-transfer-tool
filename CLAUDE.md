@@ -490,6 +490,34 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
    - Geography columns working in all scenarios
 9. Released v1.42.0
 
+### Session 11: AI-Assisted Type Mapping (Claude - January 12, 2026)
+1. Implemented AI-powered type mapping for unknown database types:
+   - Supports Claude, OpenAI, and Gemini providers
+   - Uses smart models by default (Sonnet, GPT-4o, Gemini Flash)
+   - Samples complete rows (not just columns) for better context
+   - Caches mappings in `~/.mssql-pg-migrate/type-cache.json`
+2. Key files added:
+   - `internal/driver/ai_typemapper.go` - AI type mapper implementation
+   - `internal/driver/ai_typemapper_test.go` - Comprehensive tests
+3. Fixed PG→MSSQL varchar encoding issue:
+   - PostgreSQL varchar stores **characters** (UTF-8 multibyte OK)
+   - SQL Server varchar stores **bytes** (not characters)
+   - AI now correctly infers `varchar → nvarchar` for Unicode support
+   - Users with accented names (ö, å, æ) now transfer correctly
+4. Configuration improvements:
+   - Auto-enable when `api_key` is configured
+   - Default provider to `claude` if not specified
+   - Provider validation (must be claude, openai, or gemini)
+   - Simplified config: just `api_key` is enough
+5. Efficient row sampling:
+   - `SampleRows()` function samples N complete rows per table
+   - One query per table instead of N queries per column
+   - `SampleRowsHelper()` in driver package avoids code duplication
+6. Test results (Stack Overflow 2010, 19M rows):
+   - PG→MSSQL: 8/9 tables ✓ at 194K rows/sec
+   - MSSQL→PG: All tables ✓
+7. Released v2.24.0
+
 ### Session 10: PG→MSSQL Geography Staging Table Fix (Claude - January 11, 2026)
 1. Fixed PG→MSSQL upsert failing for tables with geography columns (PR #45):
    - Previous fix (PR #43) only worked when `colTypes` contained target types
