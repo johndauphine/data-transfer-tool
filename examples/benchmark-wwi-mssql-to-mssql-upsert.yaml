@@ -8,7 +8,7 @@ source:
   port: 1435
   database: WideWorldImporters
   user: sa
-  password: "YourStrong@Passw0rd"
+  password: ${MSSQL_PASSWORD}
   schema: Sales
   encrypt: false
   trust_server_cert: true
@@ -19,7 +19,7 @@ target:
   port: 1436
   database: WideWorldImporters
   user: sa
-  password: "YourStrong@Passw0rd"
+  password: ${MSSQL_PASSWORD}
   schema: Sales
   encrypt: false
   trust_server_cert: true

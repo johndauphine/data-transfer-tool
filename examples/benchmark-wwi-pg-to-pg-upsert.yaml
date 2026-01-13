@@ -8,7 +8,7 @@ source:
   port: 5435
   database: wideworldimporters
   user: postgres
-  password: "PostgresPassword123"
+  password: ${PG_PASSWORD}
   schema: sales
   ssl_mode: disable
 
@@ -18,7 +18,7 @@ target:
   port: 5436
   database: wideworldimporters
   user: postgres
-  password: "PostgresPassword123"
+  password: ${PG_PASSWORD}
   schema: sales
   ssl_mode: disable
 
