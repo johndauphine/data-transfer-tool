@@ -149,12 +149,13 @@ func loadFromFile() (*Config, error) {
 		return nil, fmt.Errorf("reading secrets file: %w", err)
 	}
 
-	// Check file permissions (warn if too permissive)
+	// Check file permissions - reject if too permissive (security requirement)
 	info, err := os.Stat(path)
 	if err == nil {
 		mode := info.Mode().Perm()
 		if mode&0077 != 0 {
-			fmt.Fprintf(os.Stderr, "WARNING: Secrets file %s has permissive permissions (%o). Consider running: chmod 600 %s\n", path, mode, path)
+			return nil, fmt.Errorf("secrets file %s has insecure permissions (%04o). "+
+				"Other users can read your API keys. Run: chmod 600 %s", path, mode, path)
 		}
 	}
 

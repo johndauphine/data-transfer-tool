@@ -160,6 +160,17 @@ func (m *AITypeMapper) MapType(info TypeInfo) string {
 
 // MapTypeWithError maps a source type to the target type using AI, returning any error.
 func (m *AITypeMapper) MapTypeWithError(info TypeInfo) (string, error) {
+	// Validate input
+	if info.DataType == "" {
+		return "", fmt.Errorf("DataType is required")
+	}
+	if info.SourceDBType == "" {
+		return "", fmt.Errorf("SourceDBType is required")
+	}
+	if info.TargetDBType == "" {
+		return "", fmt.Errorf("TargetDBType is required")
+	}
+
 	cacheKey := m.cacheKey(info)
 
 	// Check cache first (fast path)
@@ -713,8 +724,7 @@ func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (strin
 	}
 
 	model := m.provider.GetEffectiveModel(m.providerName)
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
-		model, m.provider.APIKey)
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", model)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
@@ -722,6 +732,7 @@ func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (strin
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", m.provider.APIKey)
 
 	resp, err := m.client.Do(req)
 	if err != nil {
