@@ -370,12 +370,11 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 		sb.WriteString("\nTarget: Standard PostgreSQL (no extensions installed).\n")
 	case "mssql":
 		sb.WriteString("\nTarget: SQL Server with full native type support.\n")
-		// Add critical encoding guidance for string types from PostgreSQL
+		// Add encoding context for string types from PostgreSQL
 		if info.SourceDBType == "postgres" && (strings.HasPrefix(strings.ToLower(info.DataType), "varchar") ||
 			strings.HasPrefix(strings.ToLower(info.DataType), "char") ||
 			strings.ToLower(info.DataType) == "text") {
-			sb.WriteString("IMPORTANT: PostgreSQL varchar/char/text stores characters (UTF-8 multibyte supported).\n")
-			sb.WriteString("SQL Server varchar stores BYTES, not characters - use nvarchar for Unicode data.\n")
+			sb.WriteString("Note: PostgreSQL string types store characters. SQL Server varchar stores bytes, nvarchar stores characters.\n")
 		}
 	}
 
