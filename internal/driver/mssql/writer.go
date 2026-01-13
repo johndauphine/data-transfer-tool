@@ -61,18 +61,16 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 
 	logging.Info("Connected to MSSQL target: %s:%d/%s", cfg.Host, cfg.Port, cfg.Database)
 
-	// Initialize type mapper - use AI mapper if configured, otherwise static
-	typeMapper, err := driver.NewTypeMapperFromConfig(opts.AITypeMapping, &TypeMapper{})
-	if err != nil {
+	// Validate type mapper is provided
+	if opts.TypeMapper == nil {
 		db.Close()
-		return nil, fmt.Errorf("creating type mapper: %w", err)
+		return nil, fmt.Errorf("TypeMapper is required")
 	}
 
 	// Log AI mapper initialization
-	if aiMapper, ok := typeMapper.(*driver.AITypeMapper); ok {
+	if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
 		logging.Info("AI Type Mapping enabled (provider: %s, model: %s)",
-			opts.AITypeMapping.Provider, opts.AITypeMapping.Model)
-		logging.Info("AI Type Mapper initialized with cache: %s", opts.AITypeMapping.CacheFile)
+			aiMapper.ProviderName(), aiMapper.Model())
 		if aiMapper.CacheSize() > 0 {
 			logging.Info("Loaded %d cached AI type mappings", aiMapper.CacheSize())
 		}
@@ -86,7 +84,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		compatLevel:  compatLevel,
 		sourceType:   opts.SourceType,
 		dialect:      dialect,
-		typeMapper:   typeMapper,
+		typeMapper:   opts.TypeMapper,
 	}, nil
 }
 

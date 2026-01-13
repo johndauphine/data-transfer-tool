@@ -49,8 +49,3 @@ func (d *Driver) NewReader(cfg *dbconfig.SourceConfig, maxConns int) (driver.Rea
 func (d *Driver) NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptions) (driver.Writer, error) {
 	return NewWriter(cfg, maxConns, opts)
 }
-
-// TypeMapper returns the PostgreSQL type mapper.
-func (d *Driver) TypeMapper() driver.TypeMapper {
-	return &TypeMapper{}
-}

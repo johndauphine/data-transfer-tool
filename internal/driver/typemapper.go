@@ -120,21 +120,8 @@ func GetDirection(sourceType, targetType string) Direction {
 	}
 }
 
-// NewTypeMapperFromConfig creates a TypeMapper based on the configuration.
-// If AITypeMappingConfig is provided and enabled, returns an AI-powered mapper
-// that falls back to the static mapper when AI is unavailable.
-// Otherwise returns the provided static fallback mapper.
-// This helper avoids duplicating AI mapper initialization in each writer.
-func NewTypeMapperFromConfig(aiConfig *AITypeMappingConfig, staticMapper TypeMapper) (TypeMapper, error) {
-	if aiConfig == nil || !aiConfig.Enabled {
-		return staticMapper, nil
-	}
-
-	// Pass the static mapper as fallback for when AI API fails
-	aiMapper, err := NewAITypeMapper(*aiConfig, staticMapper)
-	if err != nil {
-		return nil, err
-	}
-
-	return aiMapper, nil
+// GetAITypeMapper returns the global AI type mapper loaded from secrets.
+// This is the only type mapper available - all type mapping is done via AI.
+func GetAITypeMapper() (TypeMapper, error) {
+	return NewAITypeMapperFromSecrets()
 }

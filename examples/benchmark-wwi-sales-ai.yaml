@@ -8,7 +8,7 @@ source:
   port: 1435
   database: WideWorldImporters
   user: sa
-  password: "YourStrong@Passw0rd"
+  password: ${MSSQL_PASSWORD}
   schema: Sales
   encrypt: false
   trust_server_cert: true
@@ -19,7 +19,7 @@ target:
   port: 5435
   database: wideworldimporters
   user: postgres
-  password: "PostgresPassword123"
+  password: ${PG_PASSWORD}
   schema: sales
   ssl_mode: disable
 
@@ -35,9 +35,4 @@ migration:
     - BuyingGroups_Archive
     - CustomerCategories_Archive
 
-# AI-assisted type mapping
-ai:
-  api_key: ${file:~/.secrets/anthropic-api-key}
-  provider: claude
-  type_mapping:
-    enabled: true
+# AI type mapping is configured in ~/.secrets/dmt-config.yaml

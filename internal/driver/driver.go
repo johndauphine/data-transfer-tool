@@ -64,9 +64,6 @@ type Driver interface {
 
 	// NewWriter creates a new Writer for this database type.
 	NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts WriterOptions) (Writer, error)
-
-	// TypeMapper returns the type mapper for converting to/from this database's types.
-	TypeMapper() TypeMapper
 }
 
 // WriterOptions contains options for creating a Writer.
@@ -77,7 +74,7 @@ type WriterOptions struct {
 	// SourceType is the source database type (for cross-engine type handling).
 	SourceType string
 
-	// AITypeMapping contains optional AI-assisted type mapping configuration.
-	// When enabled, the AI mapper is used for type conversions instead of static mappings.
-	AITypeMapping *AITypeMappingConfig
+	// TypeMapper is the AI-powered type mapper for database type conversions.
+	// This is required for all migrations.
+	TypeMapper TypeMapper
 }

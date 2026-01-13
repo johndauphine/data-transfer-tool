@@ -4,7 +4,7 @@ source:
   port: 5433
   database: so2010
   user: postgres
-  password: "PostgresPassword123"
+  password: ${PG_PASSWORD}
   schema: public
   ssl_mode: disable
 
@@ -14,7 +14,7 @@ target:
   port: 5433
   database: so2010_pg_test
   user: postgres
-  password: "PostgresPassword123"
+  password: ${PG_PASSWORD}
   schema: public
   ssl_mode: disable
 

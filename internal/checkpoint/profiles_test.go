@@ -10,8 +10,24 @@ import (
 // testMasterKey is a valid 32-byte key for testing (base64 encoded)
 var testMasterKey = base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 
+// disableSecretsFile points DMT_SECRETS_FILE to a non-existent path to force env var fallback
+func disableSecretsFile(t *testing.T) func() {
+	t.Helper()
+	oldSecretsFile := os.Getenv("DMT_SECRETS_FILE")
+	os.Setenv("DMT_SECRETS_FILE", "/nonexistent/path/secrets.yaml")
+	return func() {
+		if oldSecretsFile != "" {
+			os.Setenv("DMT_SECRETS_FILE", oldSecretsFile)
+		} else {
+			os.Unsetenv("DMT_SECRETS_FILE")
+		}
+	}
+}
+
 func setupTestMasterKey(t *testing.T) func() {
 	t.Helper()
+	// Disable secrets file to force env var usage
+	cleanupSecrets := disableSecretsFile(t)
 	oldKey := os.Getenv(masterKeyEnv)
 	os.Setenv(masterKeyEnv, testMasterKey)
 	return func() {
@@ -20,6 +36,7 @@ func setupTestMasterKey(t *testing.T) func() {
 		} else {
 			os.Unsetenv(masterKeyEnv)
 		}
+		cleanupSecrets()
 	}
 }
 
@@ -174,6 +191,10 @@ func TestDecryptInvalidPayload(t *testing.T) {
 
 func TestGetMasterKey(t *testing.T) {
 	t.Run("missing key", func(t *testing.T) {
+		// Disable secrets file to test env var fallback
+		cleanupSecrets := disableSecretsFile(t)
+		defer cleanupSecrets()
+
 		oldKey := os.Getenv(masterKeyEnv)
 		os.Unsetenv(masterKeyEnv)
 		defer func() {
@@ -189,6 +210,10 @@ func TestGetMasterKey(t *testing.T) {
 	})
 
 	t.Run("invalid base64", func(t *testing.T) {
+		// Disable secrets file to test env var fallback
+		cleanupSecrets := disableSecretsFile(t)
+		defer cleanupSecrets()
+
 		oldKey := os.Getenv(masterKeyEnv)
 		os.Setenv(masterKeyEnv, "not-valid-base64!!!")
 		defer func() {
@@ -206,6 +231,10 @@ func TestGetMasterKey(t *testing.T) {
 	})
 
 	t.Run("wrong key length", func(t *testing.T) {
+		// Disable secrets file to test env var fallback
+		cleanupSecrets := disableSecretsFile(t)
+		defer cleanupSecrets()
+
 		oldKey := os.Getenv(masterKeyEnv)
 		shortKey := base64.StdEncoding.EncodeToString([]byte("tooshort"))
 		os.Setenv(masterKeyEnv, shortKey)
