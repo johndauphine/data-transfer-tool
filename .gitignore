@@ -1,6 +1,8 @@
 # Binaries
 mssql-pg-migrate
 mssql-pg-migrate-*
+data-transfer-tool
+data-transfer-tool-*
 *.exe
 
 # Config with secrets
