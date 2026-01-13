@@ -253,9 +253,10 @@ The migration tool uses these parameters:
 
 Guidelines (in priority order):
 1. CHUNK SIZE IS THE MOST IMPORTANT PARAMETER - larger chunks = higher throughput
-   - Target 120K-200K rows per chunk for optimal batch processing
-   - Formula: chunk_size = min(200000, 50MB / avg_row_bytes)
-   - NEVER use chunks smaller than 100K for datasets over 1M rows
+   - ALWAYS use 100K-200K rows per chunk regardless of dataset size
+   - Minimum chunk_size should be 100000 rows
+   - Only reduce below 100K if avg_row_bytes > 1000 AND memory_gb < 8
+   - Even small datasets benefit from large chunks (reduces per-batch overhead)
 
 2. workers should be cores-2 but capped at 12 (diminishing returns beyond)
 
