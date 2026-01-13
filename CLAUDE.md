@@ -282,6 +282,32 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ## Session History
 
+### Session 22: Pluggable Driver Architecture - Dialect Consolidation (Claude - January 12, 2026)
+1. **Consolidated Dialect interface into driver package** (PR #67):
+   - Eliminated switch statement in `GetDialect()` - now uses driver registry pattern
+   - Added `driver.GetDialect()` function that looks up dialect via registered drivers
+   - Moved `DateFilter` type to `driver/dialect.go` (single source of truth)
+   - Updated `driver.Dialect` interface with clearer method signatures:
+     - `BuildKeysetArgs(lastPK, maxPK, limit, hasMaxPK, dateFilter)`
+     - `BuildRowNumberArgs(rowNum, limit)`
+2. **Deprecated `internal/dialect` package**:
+   - Converted to backward-compat shim delegating to `driver.GetDialect()`
+   - Type aliases: `Dialect = driver.Dialect`, `DateFilter = driver.DateFilter`
+   - All consumers updated to use `driver` package directly
+3. **Fixed PostgreSQL reader inconsistency**:
+   - Was manually building keyset args instead of using `dialect.BuildKeysetArgs()`
+   - Now consistent with MSSQL reader pattern
+4. **Added nil checks for GetDialect()** (Copilot review feedback):
+   - `executeKeysetPagination` and `executeRowNumberPagination` return error if dialect nil
+   - Test functions use `t.Fatalf()` for nil dialect
+   - Added `TestGetDialect_UnknownType` for empty/unknown db types
+5. **Code reduction**: 11 files changed, +178 / -539 lines (net -361 lines)
+6. **Architecture result** - Adding a new database now requires:
+   - Create `internal/driver/<dbname>/` with driver.go, dialect.go, reader.go, writer.go
+   - Implement `Driver` interface and register via `init()`
+   - **Zero changes to core code** (pool, transfer, orchestrator)
+7. Released v2.27.0
+
 ### Session 21: AI-First Type Mapping with Aggressive Caching (Claude - January 12, 2026)
 1. **Codex review feedback on AI type mapping**:
    - HIGH: AI was always primary mapper, triggering API calls for known types
