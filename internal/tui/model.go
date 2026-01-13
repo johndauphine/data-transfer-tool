@@ -1486,7 +1486,7 @@ func (m Model) welcomeMessage() string {
 
 	body := `
  Welcome to dmt. This tool allows you to safely and
- efficiently move data between SQL Server and PostgreSQL.
+ efficiently migrate data between databases.
 
  Type /help to see available commands.
 `
@@ -1557,7 +1557,6 @@ Note: You can use @/path/to/file for config files.`
 %s
 
 Features:
-- Bidirectional: SQL Server <-> PostgreSQL
 - Parallel transfer with auto-tuning
 - Resume capability (chunk-level)
 - Data validation
