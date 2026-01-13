@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 )
 
@@ -154,4 +155,38 @@ func isIntegerType(dataType string) bool {
 		}
 	}
 	return false
+}
+
+// AnalyzeConfig uses AI to analyze the source database and suggest optimal configuration.
+func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*driver.SmartConfigSuggestions, error) {
+	logging.Info("Analyzing source database for configuration suggestions...")
+
+	// Create AI mapper if configured
+	var aiMapper *driver.AITypeMapper
+	if o.config.AI != nil && o.config.AI.APIKey != "" {
+		aiConfig := &driver.AITypeMappingConfig{
+			Enabled:        true,
+			Provider:       o.config.AI.Provider,
+			APIKey:         o.config.AI.APIKey,
+			Model:          o.config.AI.Model,
+			TimeoutSeconds: o.config.AI.TimeoutSeconds,
+		}
+		var err error
+		aiMapper, err = driver.NewAITypeMapper(*aiConfig, nil)
+		if err != nil {
+			logging.Warn("Failed to create AI mapper for analysis: %v", err)
+			// Continue without AI
+		}
+	}
+
+	// Create the smart config analyzer
+	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType(), aiMapper)
+
+	// Run analysis
+	suggestions, err := analyzer.Analyze(ctx, schema)
+	if err != nil {
+		return nil, fmt.Errorf("analyzing config: %w", err)
+	}
+
+	return suggestions, nil
 }

@@ -150,21 +150,20 @@ Descriptions are shown in `profile list`.
 - You can relocate the SQLite DB by setting `migration.data_dir` in your config (e.g., to a shared volume).
 - On first run, the default data directory (`~/.mssql-pg-migrate`) is created automatically if it does not exist.
 
-## AI-Assisted Type Mapping (New in v2.24.0)
+## AI Features
 
-For complex migrations with unusual data types, enable AI-assisted type mapping to automatically infer the best target type using an LLM.
+The tool includes AI-powered features to help with complex migrations. All AI features share common configuration under the `ai` section.
 
 ### Quick Start
 
-Simply add your API key to enable AI type mapping:
+Simply add your API key to enable AI features:
 
 ```yaml
-migration:
-  ai_type_mapping:
-    api_key: ${ANTHROPIC_API_KEY}   # or OPENAI_API_KEY or GEMINI_API_KEY
+ai:
+  api_key: ${ANTHROPIC_API_KEY}   # or OPENAI_API_KEY or GEMINI_API_KEY
 ```
 
-That's it! The feature auto-enables when `api_key` is configured. Provider defaults to Claude (Anthropic).
+This auto-enables AI type mapping. Provider defaults to Claude (Anthropic).
 
 ### Supported Providers
 
@@ -177,33 +176,67 @@ That's it! The feature auto-enables when `api_key` is configured. Provider defau
 ### Full Configuration
 
 ```yaml
-migration:
-  ai_type_mapping:
-    api_key: ${ANTHROPIC_API_KEY}  # Required - your API key
-    provider: claude               # Optional - claude (default), openai, or gemini
-    model: claude-sonnet-4-20250514  # Optional - uses provider default if not set
-    cache_file: ~/.mssql-pg-migrate/type-cache.json  # Optional - type mapping cache
+ai:
+  api_key: ${ANTHROPIC_API_KEY}  # Required - your API key
+  provider: claude               # Optional - claude (default), openai, or gemini
+  model: claude-sonnet-4-20250514  # Optional - uses provider default if not set
+
+  type_mapping:
+    enabled: true                # Auto-enabled when api_key is set
+    cache_file: ~/.mssql-pg-migrate/type-cache.json
 ```
 
-### How It Works
+### AI Type Mapping
 
-1. **Data Sampling**: Before mapping, the tool samples up to 5 rows from each table to give the AI real data context
-2. **Intelligent Inference**: The AI analyzes column metadata (name, type, precision, scale) plus sample values
-3. **Cross-Engine Awareness**: For PG→MSSQL, the AI understands encoding differences (PostgreSQL varchar=characters, SQL Server varchar=bytes)
-4. **Caching**: Mappings are cached to `~/.mssql-pg-migrate/type-cache.json` to minimize API calls
-5. **Fallback Chain**: Built-in mappings are tried first; AI is only called for unknown types
+Automatically infers the best target type for unknown or complex source types.
 
-### When to Use AI Type Mapping
+**How it works:**
+1. **Data Sampling**: Samples up to 5 rows from each table for context
+2. **Intelligent Inference**: AI analyzes column metadata plus sample values
+3. **Cross-Engine Awareness**: Understands encoding differences (e.g., PG varchar → MSSQL nvarchar)
+4. **Caching**: Mappings cached to minimize API calls
 
-- **Complex types**: Custom domains, user-defined types, or database-specific types
-- **Cross-engine migrations**: When source and target have different type systems
-- **Unicode handling**: AI correctly infers `nvarchar` for UTF-8 text going to SQL Server
+**When to use:**
+- Custom domains, user-defined types, or database-specific types
+- Cross-engine migrations with different type systems
+- Unicode handling (AI correctly infers `nvarchar` for UTF-8 text)
+
+### Smart Config Detection
+
+Analyze your source database and get optimal configuration suggestions:
+
+```bash
+./mssql-pg-migrate -c config.yaml analyze
+```
+
+**Output example:**
+```yaml
+# AI-detected configuration suggestions
+
+migration:
+  date_updated_columns:
+    - UpdatedAt
+    - ModifiedDate
+    - LastModified
+
+  exclude_tables:
+    - temp_imports
+    - audit_log
+    - __EFMigrationsHistory
+
+  chunk_size: 150000
+```
+
+**What it detects:**
+- **Date columns**: Columns suitable for incremental sync (UpdatedAt, ModifiedDate, etc.)
+- **Exclude tables**: Tables that should probably be excluded (temp, log, archive, etc.)
+- **Chunk size**: Optimal chunk size based on average row sizes
 
 ### Cost Considerations
 
 - Each unique type mapping requires one API call (cached for future runs)
 - Typical migration: 20-50 API calls on first run, zero on subsequent runs
-- Use `cache_file` to share mappings across environments
+- Smart config analysis: 0 API calls (uses pattern matching, not AI)
 
 ## State File Backend (Airflow/Kubernetes)
 
@@ -735,14 +768,22 @@ The `migration` section controls how data is transferred.
 | `parallel_readers` | No | 2 | Parallel readers per job. Use 1 for local databases |
 | `mssql_rows_per_batch` | No | Same as `chunk_size` | SQL Server bulk copy batch size hint |
 
-**AI Type Mapping:**
+### AI Settings
+
+The `ai` section configures AI-powered features.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `ai_type_mapping.api_key` | Yes (if enabled) | - | API key for the AI provider. Auto-enables AI mapping when set. |
-| `ai_type_mapping.provider` | No | `claude` | AI provider: `claude`, `openai`, or `gemini` |
-| `ai_type_mapping.model` | No | Provider default | Model to use (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.0-flash`) |
-| `ai_type_mapping.cache_file` | No | `~/.mssql-pg-migrate/type-cache.json` | Path to cache AI type mappings |
+| `ai.api_key` | Yes (if using AI) | - | API key for the AI provider |
+| `ai.provider` | No | `claude` | AI provider: `claude`, `openai`, or `gemini` |
+| `ai.model` | No | Provider default | Model to use (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.0-flash`) |
+| `ai.timeout_seconds` | No | `30` | API request timeout |
+| `ai.type_mapping.enabled` | No | Auto | Enable AI type mapping (auto-enabled when api_key is set) |
+| `ai.type_mapping.cache_file` | No | `~/.mssql-pg-migrate/type-cache.json` | Path to cache AI type mappings |
+| `ai.smart_config.enabled` | No | `false` | Enable smart config detection |
+| `ai.smart_config.detect_date_columns` | No | `true` | Detect date_updated_columns candidates |
+| `ai.smart_config.detect_exclude_tables` | No | `true` | Detect tables to exclude |
+| `ai.smart_config.suggest_chunk_size` | No | `true` | Suggest optimal chunk size |
 
 ### Slack Notification Settings
 
@@ -1086,6 +1127,9 @@ slack:
 
 # View details for a specific run (shows error if failed)
 ./mssql-pg-migrate -c config.yaml history --run <run-id>
+
+# Analyze source database and get configuration suggestions
+./mssql-pg-migrate -c config.yaml analyze
 ```
 
 ### Headless Mode (Airflow/Kubernetes)

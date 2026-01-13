@@ -462,6 +462,28 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
    - Test for SRID 0 fallback to default 4326
 7. All CI checks passed, PR merged to main
 
+### Session 12: AI Config Restructure & Smart Config Detection (Claude - January 12, 2026)
+1. Restructured AI configuration from `migration.ai_type_mapping` to top-level `ai`:
+   - Breaking config change: `ai_type_mapping` → `ai` with nested features
+   - Shared settings (api_key, provider, model) now at `ai` level
+   - Type mapping settings under `ai.type_mapping`
+2. Added smart config detection feature (no config needed, runs on demand):
+   - New `analyze` CLI command: `mssql-pg-migrate -c config.yaml analyze`
+   - Detects date columns for incremental sync (UpdatedAt, ModifiedDate, etc.)
+   - Identifies tables to exclude (temp_, log_, archive_, etc.)
+   - Recommends chunk size based on table row sizes
+   - Output is YAML-formatted for easy copy/paste
+3. Fixed Codex review findings:
+   - Medium: Auto-enable now respects explicit `enabled: false`
+   - Low: Provider validation is now case-insensitive (Claude, CLAUDE, claude all work)
+4. Fixed flaky TestAITypeMapper_ExportCache test:
+   - Was using shared cache file, now uses `t.TempDir()` for isolation
+5. Key files:
+   - `internal/config/config.go` - New AIConfig struct with nested configs
+   - `internal/driver/ai_smartconfig.go` - Smart config analyzer
+   - `cmd/migrate/main.go` - Added analyze command
+6. Updated README with new AI config structure and analyze command docs
+
 ### Session 11: Security & Correctness Fixes (Claude - January 11, 2026)
 1. Ran Gemini CLI code review on codebase - identified security vulnerabilities
 2. Fixed DSN injection vulnerabilities (PR #46):
