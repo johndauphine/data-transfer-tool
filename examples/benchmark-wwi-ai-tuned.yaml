@@ -25,13 +25,13 @@ target:
   ssl_mode: disable
 
 migration:
-  # AI-suggested values (from wizard analysis)
-  workers: 12
-  chunk_size: 25000
-  read_ahead_buffers: 3
+  # AI-suggested values (updated with chunk-prioritized prompt)
+  workers: 14
+  chunk_size: 150000
+  read_ahead_buffers: 4
   max_partitions: 12
   large_table_threshold: 5000000
-  # Estimated memory: ~4395MB
+  # Estimated memory: ~6400MB
 
   create_indexes: false
   create_foreign_keys: false
