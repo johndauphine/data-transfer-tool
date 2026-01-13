@@ -38,7 +38,7 @@ migration:
 
 # AI-assisted type mapping
 ai:
-  api_key: ${file:/home/johnd/.secrets/anthropic-api-key}
+  api_key: ${file:~/.secrets/anthropic-api-key}
   provider: claude
   type_mapping:
     enabled: true
