@@ -1,8 +1,8 @@
 package mssql
 
 import (
-	"github.com/johndauphine/data-transfer-tool/internal/dbconfig"
-	"github.com/johndauphine/data-transfer-tool/internal/driver"
+	"github.com/johndauphine/data-migration-tool/internal/dbconfig"
+	"github.com/johndauphine/data-migration-tool/internal/driver"
 )
 
 func init() {

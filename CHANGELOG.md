@@ -19,7 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - **Pluggable driver architecture** - Consolidated Dialect into driver package, eliminated switch statements
-- **Project renamed** - `mssql-pg-migrate` → `data-transfer-tool`
+- **Project renamed** - `mssql-pg-migrate` → `dmt`
 
 ## [2.26.0] - 2026-01-12
 
@@ -30,7 +30,7 @@ All notable changes to this project will be documented in this file.
 ## [2.25.0] - 2026-01-12
 
 ### Added
-- **Analyze command** - `data-transfer-tool analyze` for database analysis and config suggestions
+- **Analyze command** - `dmt analyze` for database analysis and config suggestions
 - Auto-tuned performance parameters based on system specs
 - AI-suggested alternatives with reasoning
 

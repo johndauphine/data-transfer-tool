@@ -1,4 +1,4 @@
-module github.com/johndauphine/data-transfer-tool
+module github.com/johndauphine/data-migration-tool
 
 go 1.24.0
 

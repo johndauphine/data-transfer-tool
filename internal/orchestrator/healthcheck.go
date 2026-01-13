@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/data-transfer-tool/internal/driver"
-	"github.com/johndauphine/data-transfer-tool/internal/logging"
+	"github.com/johndauphine/data-migration-tool/internal/driver"
+	"github.com/johndauphine/data-migration-tool/internal/logging"
 )
 
 // HealthCheck tests connectivity to source and target databases.

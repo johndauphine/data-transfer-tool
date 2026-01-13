@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/johndauphine/data-transfer-tool/internal/driver"
+	"github.com/johndauphine/data-migration-tool/internal/driver"
 )
 
 // Dialect implements driver.Dialect for PostgreSQL.

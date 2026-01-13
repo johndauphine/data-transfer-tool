@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/johndauphine/data-transfer-tool/internal/driver"
-	"github.com/johndauphine/data-transfer-tool/internal/progress"
+	"github.com/johndauphine/data-migration-tool/internal/driver"
+	"github.com/johndauphine/data-migration-tool/internal/progress"
 )
 
 // writerPool manages a pool of parallel write workers.

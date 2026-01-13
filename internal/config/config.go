@@ -9,14 +9,14 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/johndauphine/data-transfer-tool/internal/dbconfig"
-	"github.com/johndauphine/data-transfer-tool/internal/driver"
-	"github.com/johndauphine/data-transfer-tool/internal/logging"
+	"github.com/johndauphine/data-migration-tool/internal/dbconfig"
+	"github.com/johndauphine/data-migration-tool/internal/driver"
+	"github.com/johndauphine/data-migration-tool/internal/logging"
 	"gopkg.in/yaml.v3"
 
 	// Import driver packages to trigger init() registration before validation
-	_ "github.com/johndauphine/data-transfer-tool/internal/driver/mssql"
-	_ "github.com/johndauphine/data-transfer-tool/internal/driver/postgres"
+	_ "github.com/johndauphine/data-migration-tool/internal/driver/mssql"
+	_ "github.com/johndauphine/data-migration-tool/internal/driver/postgres"
 )
 
 // Type aliases for database configuration types.
@@ -234,7 +234,7 @@ type AITypeMappingConfig struct {
 	Enabled *bool `yaml:"enabled"`
 
 	// CacheFile is the path to the JSON cache file for type mappings.
-	// Defaults to ~/.data-transfer-tool/type-cache.json
+	// Defaults to ~/.dmt/type-cache.json
 	CacheFile string `yaml:"cache_file"`
 }
 
@@ -327,7 +327,7 @@ func DefaultDataDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".data-transfer-tool")
+	dir := filepath.Join(home, ".dmt")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
@@ -459,7 +459,7 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Migration.DataDir == "" {
 		home, _ := os.UserHomeDir()
-		c.Migration.DataDir = filepath.Join(home, ".data-transfer-tool")
+		c.Migration.DataDir = filepath.Join(home, ".dmt")
 	} else {
 		c.Migration.DataDir = expandTilde(c.Migration.DataDir)
 	}

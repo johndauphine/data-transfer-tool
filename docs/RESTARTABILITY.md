@@ -18,7 +18,7 @@ Two state backends are available:
 
 | Backend | Storage | Use Case | Config Hash | Chunk Progress |
 |---------|---------|----------|-------------|----------------|
-| SQLite (default) | `~/.data-transfer-tool/migrate.db` | Desktop/interactive | ✅ Yes | ✅ Yes |
+| SQLite (default) | `~/.dmt/migrate.db` | Desktop/interactive | ✅ Yes | ✅ Yes |
 | File-based | User-specified YAML file | Airflow/headless | ✅ Yes | ✅ Yes |
 
 ### Key Files
@@ -313,20 +313,20 @@ go test ./internal/checkpoint/... -v
 
 3. **Start migration**:
    ```bash
-   ./data-transfer-tool -c config.yaml run
+   ./dmt -c config.yaml run
    ```
 
 4. **Kill process mid-transfer**: Press Ctrl+C or `kill -9 <pid>` during transfer phase
 
 5. **Check SQLite state**:
    ```bash
-   sqlite3 ~/.data-transfer-tool/migrate.db "SELECT * FROM transfer_progress"
-   sqlite3 ~/.data-transfer-tool/migrate.db "SELECT * FROM runs WHERE status='running'"
+   sqlite3 ~/.dmt/migrate.db "SELECT * FROM transfer_progress"
+   sqlite3 ~/.dmt/migrate.db "SELECT * FROM runs WHERE status='running'"
    ```
 
 6. **Resume**:
    ```bash
-   ./data-transfer-tool -c config.yaml resume
+   ./dmt -c config.yaml resume
    ```
 
 7. **Verify**:
@@ -342,14 +342,14 @@ go test ./internal/checkpoint/... -v
 
 3. **Attempt resume**:
    ```bash
-   ./data-transfer-tool -c config.yaml resume
+   ./dmt -c config.yaml resume
    ```
 
 4. **Expected**: Error message about config hash mismatch
 
 5. **Force resume** (if needed):
    ```bash
-   ./data-transfer-tool -c config.yaml resume --force-resume
+   ./dmt -c config.yaml resume --force-resume
    ```
 
 ### Manual Testing: Retry Logic
@@ -374,7 +374,7 @@ go test ./internal/checkpoint/... -v
 
 1. **Create old test runs**:
    ```bash
-   sqlite3 ~/.data-transfer-tool/migrate.db "INSERT INTO runs (id, started_at, completed_at, status, source_schema, target_schema) VALUES ('old-run-1', datetime('now', '-60 days'), datetime('now', '-60 days'), 'success', 'dbo', 'public')"
+   sqlite3 ~/.dmt/migrate.db "INSERT INTO runs (id, started_at, completed_at, status, source_schema, target_schema) VALUES ('old-run-1', datetime('now', '-60 days'), datetime('now', '-60 days'), 'success', 'dbo', 'public')"
    ```
 
 2. **Configure retention**:
@@ -387,7 +387,7 @@ go test ./internal/checkpoint/... -v
 
 4. **Verify cleanup**:
    ```bash
-   sqlite3 ~/.data-transfer-tool/migrate.db "SELECT id FROM runs WHERE id='old-run-1'"
+   sqlite3 ~/.dmt/migrate.db "SELECT id FROM runs WHERE id='old-run-1'"
    # Should return no rows
    ```
 
@@ -408,7 +408,7 @@ echo "=== Testing Restartability ==="
 rm -f "$DB"
 
 # 2. Start migration in background
-./data-transfer-tool -c "$CONFIG" run &
+./dmt -c "$CONFIG" run &
 PID=$!
 sleep 10  # Let it run for a bit
 
@@ -424,7 +424,7 @@ sqlite3 "$DB" "SELECT table_name, rows_done, rows_total FROM transfer_progress L
 
 # 5. Resume
 echo "Resuming..."
-./data-transfer-tool -c "$CONFIG" resume
+./dmt -c "$CONFIG" resume
 
 # 6. Verify
 echo "Verifying..."
@@ -439,20 +439,20 @@ echo "=== Test Complete ==="
 
 ```bash
 # All runs
-sqlite3 ~/.data-transfer-tool/migrate.db "SELECT id, status, phase, started_at FROM runs ORDER BY started_at DESC"
+sqlite3 ~/.dmt/migrate.db "SELECT id, status, phase, started_at FROM runs ORDER BY started_at DESC"
 
 # Tasks for a run
-sqlite3 ~/.data-transfer-tool/migrate.db "SELECT task_key, status, retry_count FROM tasks WHERE run_id='<run-id>'"
+sqlite3 ~/.dmt/migrate.db "SELECT task_key, status, retry_count FROM tasks WHERE run_id='<run-id>'"
 
 # Progress for incomplete transfers
-sqlite3 ~/.data-transfer-tool/migrate.db "SELECT tp.table_name, tp.rows_done, tp.rows_total, tp.last_pk FROM transfer_progress tp JOIN tasks t ON tp.task_id = t.id WHERE t.status != 'success'"
+sqlite3 ~/.dmt/migrate.db "SELECT tp.table_name, tp.rows_done, tp.rows_total, tp.last_pk FROM transfer_progress tp JOIN tasks t ON tp.task_id = t.id WHERE t.status != 'success'"
 ```
 
 ### Enable Debug Logging
 
 ```bash
 export LOG_LEVEL=debug
-./data-transfer-tool -c config.yaml run
+./dmt -c config.yaml run
 ```
 
 Debug logs show:

@@ -3,7 +3,7 @@ package pipeline
 import (
 	"time"
 
-	"github.com/johndauphine/data-transfer-tool/internal/driver"
+	"github.com/johndauphine/data-migration-tool/internal/driver"
 )
 
 // ProgressSaver is an interface for saving transfer progress.

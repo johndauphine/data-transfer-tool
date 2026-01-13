@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/data-transfer-tool/internal/config"
+	"github.com/johndauphine/data-migration-tool/internal/config"
 )
 
 func TestNew(t *testing.T) {
@@ -480,8 +480,8 @@ func TestGetUsername(t *testing.T) {
 	t.Run("default username", func(t *testing.T) {
 		cfg := &config.SlackConfig{}
 		n := New(cfg)
-		if got := n.getUsername(); got != "data-transfer-tool" {
-			t.Errorf("getUsername() = %q, want %q", got, "data-transfer-tool")
+		if got := n.getUsername(); got != "dmt" {
+			t.Errorf("getUsername() = %q, want %q", got, "dmt")
 		}
 	})
 }

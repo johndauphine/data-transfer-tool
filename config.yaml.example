@@ -45,7 +45,7 @@ migration:
     - temp_*        # Temporary tables
 
   # Directory for state database and logs
-  data_dir: ~/.data-transfer-tool
+  data_dir: ~/.dmt
 
   # Target table handling: "drop_recreate" (default) or "upsert"
   # - drop_recreate: Drop and recreate tables (ensures schema changes are applied)

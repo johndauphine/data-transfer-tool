@@ -4,10 +4,10 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/johndauphine/data-transfer-tool/internal/driver"
+	"github.com/johndauphine/data-migration-tool/internal/driver"
 	// Import driver packages to register dialects
-	_ "github.com/johndauphine/data-transfer-tool/internal/driver/mssql"
-	_ "github.com/johndauphine/data-transfer-tool/internal/driver/postgres"
+	_ "github.com/johndauphine/data-migration-tool/internal/driver/mssql"
+	_ "github.com/johndauphine/data-migration-tool/internal/driver/postgres"
 )
 
 // Package-level dialect instances for identifier quoting

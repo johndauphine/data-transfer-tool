@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/johndauphine/data-transfer-tool/internal/checkpoint"
-	"github.com/johndauphine/data-transfer-tool/internal/config"
-	"github.com/johndauphine/data-transfer-tool/internal/logging"
-	"github.com/johndauphine/data-transfer-tool/internal/pool"
-	"github.com/johndauphine/data-transfer-tool/internal/source"
-	"github.com/johndauphine/data-transfer-tool/internal/transfer"
+	"github.com/johndauphine/data-migration-tool/internal/checkpoint"
+	"github.com/johndauphine/data-migration-tool/internal/config"
+	"github.com/johndauphine/data-migration-tool/internal/logging"
+	"github.com/johndauphine/data-migration-tool/internal/pool"
+	"github.com/johndauphine/data-migration-tool/internal/source"
+	"github.com/johndauphine/data-migration-tool/internal/transfer"
 )
 
 // JobBuilder creates transfer jobs from tables.

@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/data-transfer-tool/internal/driver"
-	"github.com/johndauphine/data-transfer-tool/internal/logging"
-	"github.com/johndauphine/data-transfer-tool/internal/progress"
+	"github.com/johndauphine/data-migration-tool/internal/driver"
+	"github.com/johndauphine/data-migration-tool/internal/logging"
+	"github.com/johndauphine/data-migration-tool/internal/progress"
 )
 
 // Config contains pipeline execution configuration.

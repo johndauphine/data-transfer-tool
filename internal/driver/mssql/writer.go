@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/data-transfer-tool/internal/dbconfig"
-	"github.com/johndauphine/data-transfer-tool/internal/driver"
-	"github.com/johndauphine/data-transfer-tool/internal/logging"
-	"github.com/johndauphine/data-transfer-tool/internal/stats"
+	"github.com/johndauphine/data-migration-tool/internal/dbconfig"
+	"github.com/johndauphine/data-migration-tool/internal/driver"
+	"github.com/johndauphine/data-migration-tool/internal/logging"
+	"github.com/johndauphine/data-migration-tool/internal/stats"
 	mssql "github.com/microsoft/go-mssqldb"
 )
 

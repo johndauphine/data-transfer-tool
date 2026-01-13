@@ -12,13 +12,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/johndauphine/data-transfer-tool/internal/checkpoint"
-	"github.com/johndauphine/data-transfer-tool/internal/config"
-	"github.com/johndauphine/data-transfer-tool/internal/exitcodes"
-	"github.com/johndauphine/data-transfer-tool/internal/logging"
-	"github.com/johndauphine/data-transfer-tool/internal/orchestrator"
-	"github.com/johndauphine/data-transfer-tool/internal/progress"
-	"github.com/johndauphine/data-transfer-tool/internal/tui"
+	"github.com/johndauphine/data-migration-tool/internal/checkpoint"
+	"github.com/johndauphine/data-migration-tool/internal/config"
+	"github.com/johndauphine/data-migration-tool/internal/exitcodes"
+	"github.com/johndauphine/data-migration-tool/internal/logging"
+	"github.com/johndauphine/data-migration-tool/internal/orchestrator"
+	"github.com/johndauphine/data-migration-tool/internal/progress"
+	"github.com/johndauphine/data-migration-tool/internal/tui"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
@@ -28,8 +28,8 @@ var version = "2.28.0"
 
 func main() {
 	app := &cli.App{
-		Name:    "data-transfer-tool",
-		Usage:   "High-performance MSSQL to PostgreSQL migration",
+		Name:    "dmt",
+		Usage:   "High-performance database migration tool",
 		Version: version,
 		Flags: []cli.Flag{
 			&cli.StringFlag{

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/data-transfer-tool/internal/checkpoint"
-	"github.com/johndauphine/data-transfer-tool/internal/config"
+	"github.com/johndauphine/data-migration-tool/internal/checkpoint"
+	"github.com/johndauphine/data-migration-tool/internal/config"
 )
 
 // ShowStatus displays status of current/last run

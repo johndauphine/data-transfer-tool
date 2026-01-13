@@ -5,7 +5,7 @@ package pool
 import (
 	"context"
 
-	"github.com/johndauphine/data-transfer-tool/internal/driver"
+	"github.com/johndauphine/data-migration-tool/internal/driver"
 )
 
 // SourcePool is an alias for driver.Reader for backward compatibility.
