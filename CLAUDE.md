@@ -467,8 +467,7 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
    - Breaking config change: `ai_type_mapping` → `ai` with nested features
    - Shared settings (api_key, provider, model) now at `ai` level
    - Type mapping settings under `ai.type_mapping`
-   - New smart config settings under `ai.smart_config`
-2. Added smart config detection feature:
+2. Added smart config detection feature (no config needed, runs on demand):
    - New `analyze` CLI command: `mssql-pg-migrate -c config.yaml analyze`
    - Detects date columns for incremental sync (UpdatedAt, ModifiedDate, etc.)
    - Identifies tables to exclude (temp_, log_, archive_, etc.)

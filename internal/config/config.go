@@ -225,9 +225,6 @@ type AIConfig struct {
 
 	// TypeMapping configures AI-assisted type mapping for unknown types.
 	TypeMapping *AITypeMappingConfig `yaml:"type_mapping"`
-
-	// SmartConfig configures AI-assisted configuration detection.
-	SmartConfig *AISmartConfigConfig `yaml:"smart_config"`
 }
 
 // AITypeMappingConfig contains settings specific to AI type mapping.
@@ -239,22 +236,6 @@ type AITypeMappingConfig struct {
 	// CacheFile is the path to the JSON cache file for type mappings.
 	// Defaults to ~/.mssql-pg-migrate/type-cache.json
 	CacheFile string `yaml:"cache_file"`
-}
-
-// AISmartConfigConfig contains settings for AI-assisted configuration detection.
-type AISmartConfigConfig struct {
-	// Enabled turns smart config detection on/off.
-	// Must be explicitly enabled.
-	Enabled *bool `yaml:"enabled"`
-
-	// DetectDateColumns enables detection of date_updated_columns candidates.
-	DetectDateColumns *bool `yaml:"detect_date_columns"`
-
-	// DetectExcludeTables enables detection of tables to exclude (temp, log, archive).
-	DetectExcludeTables *bool `yaml:"detect_exclude_tables"`
-
-	// SuggestChunkSize enables AI-based chunk size recommendations.
-	SuggestChunkSize *bool `yaml:"suggest_chunk_size"`
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -627,11 +608,6 @@ func (c *Config) applyDefaults() {
 			enabled := true
 			c.AI.TypeMapping.Enabled = &enabled
 		}
-
-		// Smart config: defaults (not auto-enabled, must be explicit)
-		if c.AI.SmartConfig == nil {
-			c.AI.SmartConfig = &AISmartConfigConfig{}
-		}
 	}
 }
 
@@ -722,11 +698,10 @@ func (c *Config) validate() error {
 
 	// Validate AI configuration
 	if c.AI != nil {
-		// Check if any AI feature is enabled
+		// Check if AI type mapping is enabled
 		typeMappingEnabled := c.AI.TypeMapping != nil && c.AI.TypeMapping.Enabled != nil && *c.AI.TypeMapping.Enabled
-		smartConfigEnabled := c.AI.SmartConfig != nil && c.AI.SmartConfig.Enabled != nil && *c.AI.SmartConfig.Enabled
 
-		if typeMappingEnabled || smartConfigEnabled {
+		if typeMappingEnabled {
 			if c.AI.APIKey == "" {
 				return fmt.Errorf("ai.api_key is required when AI features are enabled")
 			}
@@ -1209,13 +1184,6 @@ func (c *Config) DebugDump() string {
 			}
 		} else {
 			b.WriteString("  TypeMapping: disabled\n")
-		}
-
-		// Smart Config
-		if c.AI.SmartConfig != nil && c.AI.SmartConfig.Enabled != nil && *c.AI.SmartConfig.Enabled {
-			b.WriteString("  SmartConfig: enabled\n")
-		} else {
-			b.WriteString("  SmartConfig: disabled\n")
 		}
 	} else {
 		b.WriteString("  Disabled (no API key)\n")

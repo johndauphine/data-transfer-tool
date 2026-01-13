@@ -184,12 +184,6 @@ ai:
   type_mapping:
     enabled: true                # Auto-enabled when api_key is set
     cache_file: ~/.mssql-pg-migrate/type-cache.json
-
-  smart_config:
-    enabled: true                # Enable smart config detection
-    detect_date_columns: true    # Detect date_updated_columns candidates
-    detect_exclude_tables: true  # Detect tables to exclude
-    suggest_chunk_size: true     # Suggest optimal chunk size
 ```
 
 ### AI Type Mapping
