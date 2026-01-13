@@ -254,10 +254,14 @@ The migration tool uses these parameters:
 Guidelines:
 - workers should be cores-2 but capped at 12 (diminishing returns beyond)
 - chunk_size should target ~50MB per chunk based on avg_row_bytes
-- read_ahead_buffers should balance memory usage vs throughput
+- PRIORITIZE THROUGHPUT over memory conservation - use up to 50%% of available memory
+- read_ahead_buffers should be AGGRESSIVE: use 8-16 buffers when memory allows (more buffers = higher throughput)
+- Formula: available_memory_for_buffers = memory_gb * 0.5 * 1024 * 1024 * 1024
+- Optimal read_ahead_buffers = available_memory_for_buffers / (workers * 2 * chunk_size * avg_row_bytes)
 - Estimate memory as: workers * read_ahead_buffers * 2 * chunk_size * avg_row_bytes
-- For MSSQL sources, slightly smaller chunks work better due to TDS protocol
-- For PostgreSQL sources, larger chunks work well with COPY protocol
+- For MSSQL sources, use chunks of 100K-150K rows for optimal TDS protocol performance
+- For PostgreSQL sources, larger chunks (200K-500K) work well with COPY protocol
+- For large datasets (>1M rows), maximize parallelism and buffer depth
 
 Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
 {
