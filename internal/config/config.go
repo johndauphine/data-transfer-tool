@@ -199,11 +199,15 @@ type MigrationConfig struct {
 }
 
 // AITypeMappingConfig contains configuration for AI-assisted type mapping.
+// AI type mapping is auto-enabled when api_key is configured.
 type AITypeMappingConfig struct {
 	// Enabled turns AI type mapping on/off.
+	// Auto-enabled when api_key is configured.
 	Enabled bool `yaml:"enabled"`
 
-	// Provider specifies which AI provider to use ("claude" or "openai").
+	// Provider specifies which AI provider to use.
+	// Valid values: "claude", "openai", "gemini"
+	// Defaults to "claude" if not specified.
 	Provider string `yaml:"provider"`
 
 	// APIKey is the API key for the AI provider.
@@ -577,6 +581,15 @@ func (c *Config) applyDefaults() {
 	if c.Migration.HistoryRetentionDays == 0 {
 		c.Migration.HistoryRetentionDays = 30 // Keep run history for 30 days
 	}
+
+	// AI type mapping: auto-enable if api_key is configured
+	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.APIKey != "" {
+		c.Migration.AITypeMapping.Enabled = true
+		// Default provider to claude if not specified
+		if c.Migration.AITypeMapping.Provider == "" {
+			c.Migration.AITypeMapping.Provider = "claude"
+		}
+	}
 }
 
 // TableRowSize holds row size info for a table
@@ -663,6 +676,18 @@ func (c *Config) validate() error {
 	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "upsert" {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
 	}
+
+	// Validate AI type mapping if enabled
+	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.Enabled {
+		if c.Migration.AITypeMapping.APIKey == "" {
+			return fmt.Errorf("ai_type_mapping.api_key is required when AI type mapping is enabled")
+		}
+		if !driver.IsValidAIProvider(c.Migration.AITypeMapping.Provider) {
+			return fmt.Errorf("ai_type_mapping.provider '%s' is not valid (supported: %v)",
+				c.Migration.AITypeMapping.Provider, driver.ValidAIProviders())
+		}
+	}
+
 	return nil
 }
 

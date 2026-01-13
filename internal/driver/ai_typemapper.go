@@ -28,6 +28,20 @@ const (
 	ProviderGemini AIProvider = "gemini"
 )
 
+// ValidAIProviders returns the list of supported AI provider names.
+func ValidAIProviders() []string {
+	return []string{string(ProviderClaude), string(ProviderOpenAI), string(ProviderGemini)}
+}
+
+// IsValidAIProvider returns true if the provider name is valid.
+func IsValidAIProvider(provider string) bool {
+	switch AIProvider(provider) {
+	case ProviderClaude, ProviderOpenAI, ProviderGemini:
+		return true
+	}
+	return false
+}
+
 // AITypeMappingConfig contains configuration for AI-assisted type mapping.
 // This is a copy of config.AITypeMappingConfig to avoid import cycles.
 type AITypeMappingConfig struct {
