@@ -251,17 +251,23 @@ The migration tool uses these parameters:
 - max_partitions: Max parallel partitions for large tables (typically matches workers)
 - large_table_threshold: Row count above which tables get partitioned (typically 1M-10M)
 
-Guidelines:
-- workers should be cores-2 but capped at 12 (diminishing returns beyond)
-- chunk_size should target ~50MB per chunk based on avg_row_bytes
-- PRIORITIZE THROUGHPUT over memory conservation - use up to 50%% of available memory
-- read_ahead_buffers should be AGGRESSIVE: use 8-16 buffers when memory allows (more buffers = higher throughput)
-- Formula: available_memory_for_buffers = memory_gb * 0.5 * 1024 * 1024 * 1024
-- Optimal read_ahead_buffers = available_memory_for_buffers / (workers * 2 * chunk_size * avg_row_bytes)
-- Estimate memory as: workers * read_ahead_buffers * 2 * chunk_size * avg_row_bytes
-- For MSSQL sources, use chunks of 100K-150K rows for optimal TDS protocol performance
-- For PostgreSQL sources, larger chunks (200K-500K) work well with COPY protocol
-- For large datasets (>1M rows), maximize parallelism and buffer depth
+Guidelines (in priority order):
+1. CHUNK SIZE IS THE MOST IMPORTANT PARAMETER - larger chunks = higher throughput
+   - For MSSQL sources: use 120K-150K rows per chunk (sweet spot for TDS protocol)
+   - For PostgreSQL sources: use 200K-500K rows per chunk (COPY protocol is efficient)
+   - Formula: chunk_size = min(150000, 50MB / avg_row_bytes) for MSSQL
+   - NEVER use chunks smaller than 100K for datasets over 1M rows
+
+2. workers should be cores-2 but capped at 12 (diminishing returns beyond)
+
+3. read_ahead_buffers: use 8-12 buffers (more than 12 has diminishing returns)
+   - Buffers matter less than chunk size - prioritize larger chunks first
+   - Formula: read_ahead_buffers = min(12, available_memory / (workers * 2 * chunk_size * avg_row_bytes))
+
+4. PRIORITIZE THROUGHPUT over memory conservation - use up to 50%% of available memory
+   - Estimate memory as: workers * read_ahead_buffers * 2 * chunk_size * avg_row_bytes
+
+5. For large datasets (>1M rows), maximize chunk_size first, then adjust buffers to fit memory
 
 Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
 {
