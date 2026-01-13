@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/secrets"
 )
 
 // AIProvider represents supported AI providers for type mapping.
@@ -26,17 +27,27 @@ const (
 	ProviderOpenAI AIProvider = "openai"
 	// ProviderGemini uses Google's Gemini API.
 	ProviderGemini AIProvider = "gemini"
+	// ProviderOllama uses local Ollama with OpenAI-compatible API.
+	ProviderOllama AIProvider = "ollama"
+	// ProviderLMStudio uses local LM Studio with OpenAI-compatible API.
+	ProviderLMStudio AIProvider = "lmstudio"
 )
 
 // ValidAIProviders returns the list of supported AI provider names.
 func ValidAIProviders() []string {
-	return []string{string(ProviderClaude), string(ProviderOpenAI), string(ProviderGemini)}
+	return []string{
+		string(ProviderClaude),
+		string(ProviderOpenAI),
+		string(ProviderGemini),
+		string(ProviderOllama),
+		string(ProviderLMStudio),
+	}
 }
 
 // IsValidAIProvider returns true if the provider name is valid (case-insensitive).
 func IsValidAIProvider(provider string) bool {
 	switch AIProvider(strings.ToLower(provider)) {
-	case ProviderClaude, ProviderOpenAI, ProviderGemini:
+	case ProviderClaude, ProviderOpenAI, ProviderGemini, ProviderOllama, ProviderLMStudio:
 		return true
 	}
 	return false
@@ -52,32 +63,18 @@ func NormalizeAIProvider(provider string) string {
 	return ""
 }
 
-// AITypeMappingConfig contains configuration for AI-assisted type mapping.
-// This is a copy of config.AITypeMappingConfig to avoid import cycles.
-type AITypeMappingConfig struct {
-	Enabled        bool   // Enable AI type mapping
-	Provider       string // "claude", "openai", or "gemini"
-	APIKey         string // API key - supports same patterns as password:
-	//                       ${file:/path/to/key} - read from file
-	//                       ${env:VAR_NAME} - read from env var
-	//                       ${VAR_NAME} - legacy env var syntax
-	//                       or literal value (not recommended)
-	CacheFile      string // Path to cache file
-	Model          string // Model to use (optional)
-	TimeoutSeconds int    // API timeout
-}
-
-// AITypeMapper uses AI to map unknown database types.
-// It implements the TypeMapper interface and can be used as a fallback
-// in a ChainedTypeMapper for types not covered by static mappings.
+// AITypeMapper uses AI to map database types.
+// It implements the TypeMapper interface.
 type AITypeMapper struct {
-	config         AITypeMappingConfig
+	providerName   string
+	provider       *secrets.Provider
 	client         *http.Client
 	cache          *TypeMappingCache
+	cacheFile      string
 	cacheMu        sync.RWMutex
-	requestsMu     sync.Mutex  // Serialize API requests to avoid rate limiting
-	inflight       sync.Map    // Track in-flight requests to avoid duplicate API calls
-	fallbackMapper TypeMapper  // Static mapper to use when AI is unavailable
+	requestsMu     sync.Mutex // Serialize API requests to avoid rate limiting
+	inflight       sync.Map   // Track in-flight requests to avoid duplicate API calls
+	timeoutSeconds int
 }
 
 // inflightRequest tracks an in-progress API request for a specific type.
@@ -87,48 +84,36 @@ type inflightRequest struct {
 	err    error
 }
 
-// NewAITypeMapper creates a new AI-powered type mapper.
-// The fallbackMapper is used when AI API calls fail.
-func NewAITypeMapper(config AITypeMappingConfig, fallbackMapper TypeMapper) (*AITypeMapper, error) {
-	if !config.Enabled {
-		return nil, fmt.Errorf("AI type mapping is not enabled")
+// NewAITypeMapper creates a new AI-powered type mapper using the secrets configuration.
+func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMapper, error) {
+	if provider == nil {
+		return nil, fmt.Errorf("AI provider configuration is required")
 	}
 
-	// API key should already be expanded by config loading (supports ${file:...}, ${env:...}, ${VAR})
-	// Just verify it's not empty after expansion
-	if config.APIKey == "" {
-		return nil, fmt.Errorf("AI type mapping requires an API key")
+	// Validate cloud providers have API key
+	if !secrets.IsLocalProvider(providerName) && provider.APIKey == "" {
+		return nil, fmt.Errorf("AI provider %q requires an API key", providerName)
 	}
 
-	// Set defaults
-	if config.TimeoutSeconds <= 0 {
-		config.TimeoutSeconds = 30
+	// Get effective model
+	model := provider.GetEffectiveModel(providerName)
+	if model == "" {
+		return nil, fmt.Errorf("no model specified for provider %q", providerName)
 	}
-	if config.CacheFile == "" {
-		homeDir, _ := os.UserHomeDir()
-		config.CacheFile = filepath.Join(homeDir, ".dmt", "type-cache.json")
-	}
-	config.CacheFile = os.ExpandEnv(config.CacheFile)
 
-	// Set default models - use smarter models for better type inference accuracy
-	if config.Model == "" {
-		switch AIProvider(config.Provider) {
-		case ProviderClaude:
-			config.Model = "claude-sonnet-4-20250514"
-		case ProviderOpenAI:
-			config.Model = "gpt-4o"
-		case ProviderGemini:
-			config.Model = "gemini-2.0-flash"
-		}
-	}
+	// Set up cache file
+	homeDir, _ := os.UserHomeDir()
+	cacheFile := filepath.Join(homeDir, ".dmt", "type-cache.json")
 
 	mapper := &AITypeMapper{
-		config: config,
+		providerName: providerName,
+		provider:     provider,
 		client: &http.Client{
-			Timeout: time.Duration(config.TimeoutSeconds) * time.Second,
+			Timeout: 30 * time.Second,
 		},
 		cache:          NewTypeMappingCache(),
-		fallbackMapper: fallbackMapper,
+		cacheFile:      cacheFile,
+		timeoutSeconds: 30,
 	}
 
 	// Load existing cache
@@ -139,34 +124,62 @@ func NewAITypeMapper(config AITypeMappingConfig, fallbackMapper TypeMapper) (*AI
 	return mapper, nil
 }
 
-// MapType maps a source type to the target type using AI-first with aggressive caching.
-// This approach maximizes database agnosticism - AI determines mappings, cache prevents
-// repeated API calls. Static mappings are only used as fallback when AI fails.
+// NewAITypeMapperFromSecrets creates an AI type mapper from the global secrets configuration.
+func NewAITypeMapperFromSecrets() (*AITypeMapper, error) {
+	config, err := secrets.Load()
+	if err != nil {
+		return nil, fmt.Errorf("loading secrets: %w", err)
+	}
+
+	provider, name, err := config.GetDefaultProvider()
+	if err != nil {
+		return nil, fmt.Errorf("getting default AI provider: %w", err)
+	}
+
+	return NewAITypeMapper(name, provider)
+}
+
+// MapType maps a source type to the target type using AI.
 // This method is safe to call concurrently - it uses in-flight request tracking
 // to avoid duplicate API calls for the same type.
+// Returns an error if the AI API call fails (no fallback).
 func (m *AITypeMapper) MapType(info TypeInfo) string {
+	result, err := m.MapTypeWithError(info)
+	if err != nil {
+		// Log the error but return a safe default to avoid breaking migrations
+		// The caller should use MapTypeWithError if they want to handle errors
+		logging.Error("AI type mapping failed for %s.%s: %v", info.SourceDBType, info.DataType, err)
+		// Return a generic fallback - this should rarely happen with proper caching
+		if info.TargetDBType == "postgres" {
+			return "text"
+		}
+		return "nvarchar(max)"
+	}
+	return result
+}
+
+// MapTypeWithError maps a source type to the target type using AI, returning any error.
+func (m *AITypeMapper) MapTypeWithError(info TypeInfo) (string, error) {
 	cacheKey := m.cacheKey(info)
 
 	// Check cache first (fast path)
 	m.cacheMu.RLock()
 	if cached, ok := m.cache.Get(cacheKey); ok {
 		m.cacheMu.RUnlock()
-		return cached
+		return cached, nil
 	}
 	m.cacheMu.RUnlock()
 
 	// Check if there's already an in-flight request for this key
-	// Use LoadOrStore to atomically check and register if not present
 	req := &inflightRequest{done: make(chan struct{})}
 	if existing, loaded := m.inflight.LoadOrStore(cacheKey, req); loaded {
 		// Another goroutine is already fetching this type, wait for it
 		existingReq := existing.(*inflightRequest)
 		<-existingReq.done
 		if existingReq.err != nil {
-			// The other request failed, use fallback
-			return m.fallback(info)
+			return "", existingReq.err
 		}
-		return existingReq.result
+		return existingReq.result, nil
 	}
 
 	// We're the first to request this type, do the API call
@@ -175,13 +188,12 @@ func (m *AITypeMapper) MapType(info TypeInfo) string {
 		m.inflight.Delete(cacheKey)
 	}()
 
-	// Double-check cache after acquiring the slot (another goroutine may have
-	// completed just before our LoadOrStore)
+	// Double-check cache after acquiring the slot
 	m.cacheMu.RLock()
 	if cached, ok := m.cache.Get(cacheKey); ok {
 		m.cacheMu.RUnlock()
 		req.result = cached
-		return cached
+		return cached, nil
 	}
 	m.cacheMu.RUnlock()
 
@@ -191,11 +203,9 @@ func (m *AITypeMapper) MapType(info TypeInfo) string {
 	// Call AI API
 	result, err := m.queryAI(info)
 	if err != nil {
-		logging.Warn("AI type mapping failed for %s: %v, using fallback", info.DataType, err)
 		req.err = err
-		result = m.fallback(info)
-		req.result = result
-		return result
+		return "", fmt.Errorf("AI type mapping failed for %s.%s -> %s: %w",
+			info.SourceDBType, info.DataType, info.TargetDBType, err)
 	}
 
 	// Cache the result
@@ -216,7 +226,7 @@ func (m *AITypeMapper) MapType(info TypeInfo) string {
 		info.SourceDBType, info.DataType, info.TargetDBType, result, sampleInfo)
 
 	req.result = result
-	return result
+	return result, nil
 }
 
 // CanMap returns true - AI mapper can attempt to map any type.
@@ -235,21 +245,6 @@ func (m *AITypeMapper) cacheKey(info TypeInfo) string {
 		info.MaxLength, info.Precision, info.Scale)
 }
 
-func (m *AITypeMapper) fallback(info TypeInfo) string {
-	// Use static mapper fallback if available
-	if m.fallbackMapper != nil {
-		result := m.fallbackMapper.MapType(info)
-		logging.Info("AI fallback: using static mapping for %s -> %s", info.DataType, result)
-		return result
-	}
-
-	// Ultimate fallback if no static mapper
-	if info.TargetDBType == "postgres" {
-		return "text"
-	}
-	return "nvarchar(max)"
-}
-
 func (m *AITypeMapper) queryAI(info TypeInfo) (string, error) {
 	// Serialize API requests to avoid rate limiting
 	m.requestsMu.Lock()
@@ -257,21 +252,32 @@ func (m *AITypeMapper) queryAI(info TypeInfo) (string, error) {
 
 	prompt := m.buildPrompt(info)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.config.TimeoutSeconds)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.timeoutSeconds)*time.Second)
 	defer cancel()
 
 	var result string
 	var err error
 
-	switch AIProvider(m.config.Provider) {
+	switch AIProvider(m.providerName) {
 	case ProviderClaude:
 		result, err = m.queryClaudeAPI(ctx, prompt)
 	case ProviderOpenAI:
-		result, err = m.queryOpenAIAPI(ctx, prompt)
+		result, err = m.queryOpenAIAPI(ctx, prompt, "https://api.openai.com/v1/chat/completions")
 	case ProviderGemini:
 		result, err = m.queryGeminiAPI(ctx, prompt)
+	case ProviderOllama:
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
+	case ProviderLMStudio:
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
 	default:
-		return "", fmt.Errorf("unsupported AI provider: %s", m.config.Provider)
+		// Try OpenAI-compatible API for unknown providers with base_url
+		if m.provider.BaseURL != "" {
+			result, err = m.queryOpenAICompatAPI(ctx, prompt, m.provider.BaseURL+"/v1/chat/completions")
+		} else {
+			return "", fmt.Errorf("unsupported AI provider: %s", m.providerName)
+		}
 	}
 
 	if err != nil {
@@ -309,7 +315,6 @@ func sanitizeSampleValue(value string) string {
 
 	// Redact potential email addresses
 	if strings.Contains(value, "@") && strings.Contains(value, ".") {
-		// Simple email pattern detection - redact the local part
 		parts := strings.SplitN(value, "@", 2)
 		if len(parts) == 2 && len(parts[0]) > 0 {
 			value = "[EMAIL]@" + parts[1]
@@ -341,9 +346,8 @@ func sanitizeSampleValue(value string) string {
 		}
 	}
 	if digitCount >= 10 && digitCount <= 15 {
-		// Check if it looks like a phone number (mostly digits with optional formatting)
 		nonDigits := len(value) - digitCount
-		if nonDigits <= 4 { // Allow for dashes, spaces, parens
+		if nonDigits <= 4 {
 			value = "[PHONE]"
 		}
 	}
@@ -368,21 +372,19 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 		sb.WriteString(fmt.Sprintf("- Scale: %d\n", info.Scale))
 	}
 
-	// Include sanitized sample values if available for better context
+	// Include sanitized sample values if available
 	if len(info.SampleValues) > 0 {
-		sb.WriteString("\nSample values from source data (this is how the data will be transferred):\n")
+		sb.WriteString("\nSample values from source data:\n")
 		totalBytes := 0
 		samplesIncluded := 0
 		for _, v := range info.SampleValues {
 			if samplesIncluded >= maxSamplesInPrompt {
 				break
 			}
-			// Sanitize the value (truncate, redact PII)
 			display := sanitizeSampleValue(v)
 			if display == "" {
 				continue
 			}
-			// Check total size limit
 			if totalBytes+len(display) > maxTotalSampleBytes {
 				break
 			}
@@ -393,13 +395,12 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 		sb.WriteString("The target column must be able to store these exact values.\n")
 	}
 
-	// Add target database context and encoding guidance
+	// Add target database context
 	switch info.TargetDBType {
 	case "postgres":
 		sb.WriteString("\nTarget: Standard PostgreSQL (no extensions installed).\n")
 	case "mssql":
 		sb.WriteString("\nTarget: SQL Server with full native type support.\n")
-		// Add encoding context for string types from PostgreSQL
 		if info.SourceDBType == "postgres" && (strings.HasPrefix(strings.ToLower(info.DataType), "varchar") ||
 			strings.HasPrefix(strings.ToLower(info.DataType), "char") ||
 			strings.ToLower(info.DataType) == "text") {
@@ -438,22 +439,17 @@ type claudeResponse struct {
 	} `json:"error"`
 }
 
-// sanitizeErrorResponse truncates and sanitizes API error response bodies
-// to prevent potential API key or sensitive data leakage in error messages.
+// sanitizeErrorResponse truncates and sanitizes API error response bodies.
 func sanitizeErrorResponse(body []byte, maxLen int) string {
 	if maxLen <= 0 {
 		maxLen = 200
 	}
 
 	s := string(body)
-
-	// Truncate to max length
 	if len(s) > maxLen {
 		s = s[:maxLen] + "..."
 	}
 
-	// Remove potential API keys (patterns like sk-..., api-..., key-...)
-	// This is a defense-in-depth measure
 	keyPatterns := []string{"sk-", "api-", "key-", "secret-", "token-"}
 	for _, pattern := range keyPatterns {
 		for {
@@ -461,7 +457,6 @@ func sanitizeErrorResponse(body []byte, maxLen int) string {
 			if idx == -1 {
 				break
 			}
-			// Redact 40 chars after the pattern (typical key length)
 			endIdx := idx + len(pattern) + 40
 			if endIdx > len(s) {
 				endIdx = len(s)
@@ -474,9 +469,10 @@ func sanitizeErrorResponse(body []byte, maxLen int) string {
 }
 
 func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (string, error) {
+	model := m.provider.GetEffectiveModel(m.providerName)
 	reqBody := claudeRequest{
-		Model:     m.config.Model,
-		MaxTokens: 1024, // Enough for auto-tune JSON with reasoning
+		Model:     model,
+		MaxTokens: 1024,
 		Messages: []claudeMessage{
 			{Role: "user", Content: prompt},
 		},
@@ -493,7 +489,7 @@ func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (strin
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", m.config.APIKey)
+	req.Header.Set("x-api-key", m.provider.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := m.client.Do(req)
@@ -551,15 +547,16 @@ type openAIResponse struct {
 	} `json:"error"`
 }
 
-func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string) (string, error) {
+func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string, url string) (string, error) {
+	model := m.provider.GetEffectiveModel(m.providerName)
 	reqBody := openAIRequest{
-		Model: m.config.Model,
+		Model: model,
 		Messages: []openAIMessage{
 			{Role: "system", Content: "You are a database type mapping expert. Respond with only the target type, no explanation."},
 			{Role: "user", Content: prompt},
 		},
 		MaxTokens:   100,
-		Temperature: 0, // Deterministic
+		Temperature: 0,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -567,13 +564,13 @@ func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string) (strin
 		return "", fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return "", fmt.Errorf("creating request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.config.APIKey)
+	req.Header.Set("Authorization", "Bearer "+m.provider.APIKey)
 
 	resp, err := m.client.Do(req)
 	if err != nil {
@@ -606,10 +603,67 @@ func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string) (strin
 	return openAIResp.Choices[0].Message.Content, nil
 }
 
+// queryOpenAICompatAPI queries local providers using OpenAI-compatible API (no auth required).
+func (m *AITypeMapper) queryOpenAICompatAPI(ctx context.Context, prompt string, url string) (string, error) {
+	model := m.provider.GetEffectiveModel(m.providerName)
+	reqBody := openAIRequest{
+		Model: model,
+		Messages: []openAIMessage{
+			{Role: "system", Content: "You are a database type mapping expert. Respond with only the target type, no explanation."},
+			{Role: "user", Content: prompt},
+		},
+		MaxTokens:   100,
+		Temperature: 0,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	// No Authorization header for local providers
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("API request failed (is %s running?): %w", m.providerName, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, sanitizeErrorResponse(body, 200))
+	}
+
+	var openAIResp openAIResponse
+	if err := json.Unmarshal(body, &openAIResp); err != nil {
+		return "", fmt.Errorf("parsing response: %w", err)
+	}
+
+	if openAIResp.Error != nil {
+		return "", fmt.Errorf("API error: %s", openAIResp.Error.Message)
+	}
+
+	if len(openAIResp.Choices) == 0 || openAIResp.Choices[0].Message.Content == "" {
+		return "", fmt.Errorf("empty response from API")
+	}
+
+	return openAIResp.Choices[0].Message.Content, nil
+}
+
 // Gemini API types
 type geminiRequest struct {
-	Contents         []geminiContent  `json:"contents"`
-	GenerationConfig geminiGenConfig  `json:"generationConfig"`
+	Contents         []geminiContent `json:"contents"`
+	GenerationConfig geminiGenConfig `json:"generationConfig"`
 }
 
 type geminiContent struct {
@@ -649,7 +703,7 @@ func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (strin
 		},
 		GenerationConfig: geminiGenConfig{
 			MaxOutputTokens: 100,
-			Temperature:     0, // Deterministic
+			Temperature:     0,
 		},
 	}
 
@@ -658,9 +712,9 @@ func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (strin
 		return "", fmt.Errorf("marshaling request: %w", err)
 	}
 
-	// Gemini uses API key in URL query parameter
+	model := m.provider.GetEffectiveModel(m.providerName)
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
-		m.config.Model, m.config.APIKey)
+		model, m.provider.APIKey)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
@@ -751,9 +805,9 @@ func (c *TypeMappingCache) Load(mappings map[string]string) {
 }
 
 func (m *AITypeMapper) loadCache() error {
-	data, err := os.ReadFile(m.config.CacheFile)
+	data, err := os.ReadFile(m.cacheFile)
 	if os.IsNotExist(err) {
-		return nil // No cache file yet
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("reading cache file: %w", err)
@@ -770,8 +824,7 @@ func (m *AITypeMapper) loadCache() error {
 }
 
 func (m *AITypeMapper) saveCache() error {
-	// Ensure directory exists
-	dir := filepath.Dir(m.config.CacheFile)
+	dir := filepath.Dir(m.cacheFile)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("creating cache directory: %w", err)
 	}
@@ -782,7 +835,7 @@ func (m *AITypeMapper) saveCache() error {
 		return fmt.Errorf("marshaling cache: %w", err)
 	}
 
-	if err := os.WriteFile(m.config.CacheFile, data, 0600); err != nil {
+	if err := os.WriteFile(m.cacheFile, data, 0600); err != nil {
 		return fmt.Errorf("writing cache file: %w", err)
 	}
 
@@ -800,8 +853,7 @@ func (m *AITypeMapper) ClearCache() error {
 	m.cache = NewTypeMappingCache()
 	m.cacheMu.Unlock()
 
-	// Remove cache file
-	if err := os.Remove(m.config.CacheFile); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(m.cacheFile); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing cache file: %w", err)
 	}
 	return nil
@@ -821,34 +873,48 @@ func (m *AITypeMapper) ExportCache(w io.Writer) error {
 // CallAI sends a prompt to the configured AI provider and returns the response.
 // This is a generic method for arbitrary prompts (not just type mapping).
 func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error) {
-	// Serialize API requests to avoid rate limiting
 	m.requestsMu.Lock()
 	defer m.requestsMu.Unlock()
 
-	// Use provided context or create one with timeout
 	if ctx == nil {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(m.config.TimeoutSeconds)*time.Second)
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(m.timeoutSeconds)*time.Second)
 		defer cancel()
 	}
 
 	var result string
 	var err error
 
-	switch AIProvider(m.config.Provider) {
+	switch AIProvider(m.providerName) {
 	case ProviderClaude:
 		result, err = m.queryClaudeAPI(ctx, prompt)
 	case ProviderOpenAI:
-		result, err = m.queryOpenAIAPI(ctx, prompt)
+		result, err = m.queryOpenAIAPI(ctx, prompt, "https://api.openai.com/v1/chat/completions")
 	case ProviderGemini:
 		result, err = m.queryGeminiAPI(ctx, prompt)
+	case ProviderOllama:
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
+	case ProviderLMStudio:
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
 	default:
-		return "", fmt.Errorf("unsupported AI provider: %s", m.config.Provider)
+		if m.provider.BaseURL != "" {
+			result, err = m.queryOpenAICompatAPI(ctx, prompt, m.provider.BaseURL+"/v1/chat/completions")
+		} else {
+			return "", fmt.Errorf("unsupported AI provider: %s", m.providerName)
+		}
 	}
 
-	if err != nil {
-		return "", err
-	}
+	return result, err
+}
 
-	return result, nil
+// ProviderName returns the name of the configured provider.
+func (m *AITypeMapper) ProviderName() string {
+	return m.providerName
+}
+
+// Model returns the model being used.
+func (m *AITypeMapper) Model() string {
+	return m.provider.GetEffectiveModel(m.providerName)
 }

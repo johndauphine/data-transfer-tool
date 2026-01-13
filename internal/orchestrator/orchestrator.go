@@ -227,23 +227,17 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		}, nil
 	}
 
-	// Convert AI type mapping config if enabled
-	var aiConfig *driver.AITypeMappingConfig
-	if cfg.AI != nil && cfg.AI.TypeMapping != nil && cfg.AI.TypeMapping.Enabled != nil && *cfg.AI.TypeMapping.Enabled {
-		aiConfig = &driver.AITypeMappingConfig{
-			Enabled:        true,
-			Provider:       cfg.AI.Provider,
-			APIKey:         cfg.AI.APIKey,
-			CacheFile:      cfg.AI.TypeMapping.CacheFile,
-			Model:          cfg.AI.Model,
-			TimeoutSeconds: cfg.AI.TimeoutSeconds,
-		}
+	// Get AI type mapper from secrets configuration
+	typeMapper, err := driver.GetAITypeMapper()
+	if err != nil {
+		sourcePool.Close()
+		return nil, fmt.Errorf("loading AI type mapper: %w", err)
 	}
 
 	// Create target pool using factory
 	// Canonicalize source type to handle aliases (e.g., "sqlserver" -> "mssql")
 	sourceType := driver.Canonicalize(cfg.Source.Type)
-	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, cfg.Migration.MSSQLRowsPerBatch, sourceType, aiConfig)
+	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, cfg.Migration.MSSQLRowsPerBatch, sourceType, typeMapper)
 	if err != nil {
 		sourcePool.Close()
 		return nil, fmt.Errorf("creating target pool: %w", err)

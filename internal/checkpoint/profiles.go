@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"time"
+
+	"github.com/johndauphine/dmt/internal/secrets"
 )
 
 const (
@@ -157,9 +159,24 @@ func decryptProfile(name string, payload []byte) ([]byte, error) {
 }
 
 func getMasterKey() ([]byte, error) {
+	// First, try to get master key from secrets file
+	cfg, err := secrets.Load()
+	if err == nil && cfg.GetMasterKey() != "" {
+		key, err := base64.StdEncoding.DecodeString(cfg.GetMasterKey())
+		if err != nil {
+			return nil, fmt.Errorf("encryption.master_key in secrets file must be base64-encoded: %w", err)
+		}
+		if len(key) != 32 {
+			return nil, fmt.Errorf("encryption.master_key must decode to 32 bytes (got %d)", len(key))
+		}
+		return key, nil
+	}
+
+	// Fall back to environment variable for backwards compatibility
 	raw := os.Getenv(masterKeyEnv)
 	if raw == "" {
-		return nil, fmt.Errorf("%s is not set", masterKeyEnv)
+		return nil, fmt.Errorf("master key not found: set encryption.master_key in %s or %s env var",
+			secrets.GetSecretsPath(), masterKeyEnv)
 	}
 	key, err := base64.StdEncoding.DecodeString(raw)
 	if err != nil {

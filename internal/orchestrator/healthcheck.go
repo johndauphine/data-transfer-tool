@@ -161,22 +161,10 @@ func isIntegerType(dataType string) bool {
 func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*driver.SmartConfigSuggestions, error) {
 	logging.Info("Analyzing source database for configuration suggestions...")
 
-	// Create AI mapper if configured
-	var aiMapper *driver.AITypeMapper
-	if o.config.AI != nil && o.config.AI.APIKey != "" {
-		aiConfig := &driver.AITypeMappingConfig{
-			Enabled:        true,
-			Provider:       o.config.AI.Provider,
-			APIKey:         o.config.AI.APIKey,
-			Model:          o.config.AI.Model,
-			TimeoutSeconds: o.config.AI.TimeoutSeconds,
-		}
-		var err error
-		aiMapper, err = driver.NewAITypeMapper(*aiConfig, nil)
-		if err != nil {
-			logging.Warn("Failed to create AI mapper for analysis: %v", err)
-			// Continue without AI
-		}
+	// Get AI mapper from secrets
+	aiMapper, err := driver.NewAITypeMapperFromSecrets()
+	if err != nil {
+		return nil, fmt.Errorf("loading AI type mapper: %w", err)
 	}
 
 	// Create the smart config analyzer
