@@ -1,0 +1,43 @@
+# WideWorldImporters PG to MSSQL migration - AI Type Mapping Test
+# Source: pg-wwi (port 5435)
+# Target: mssql-wwi-target (port 1436)
+
+source:
+  type: postgres
+  host: localhost
+  port: 5435
+  database: wideworldimporters
+  user: postgres
+  password: "PostgresPassword123"
+  schema: sales
+  ssl_mode: disable
+
+target:
+  type: mssql
+  host: localhost
+  port: 1436
+  database: WideWorldImporters
+  user: sa
+  password: "YourStrong@Passw0rd"
+  schema: Sales
+  encrypt: false
+  trust_server_cert: true
+
+migration:
+  workers: 6
+  chunk_size: 50000
+  create_indexes: false
+  create_foreign_keys: false
+
+  # Exclude archive tables without PKs
+  exclude_tables:
+    - customers_archive
+    - buyinggroups_archive
+    - customercategories_archive
+
+# AI-assisted type mapping
+ai:
+  api_key: ${file:/home/johnd/.secrets/anthropic-api-key}
+  provider: claude
+  type_mapping:
+    enabled: true

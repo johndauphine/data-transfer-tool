@@ -113,6 +113,12 @@ func main() {
 				Action: runMigration,
 				Flags: []cli.Flag{
 					&cli.StringFlag{
+						Name:    "config",
+						Aliases: []string{"c"},
+						Value:   "config.yaml",
+						Usage:   "Configuration file path",
+					},
+					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
 					},
@@ -147,6 +153,12 @@ func main() {
 				Action: resumeMigration,
 				Flags: []cli.Flag{
 					&cli.StringFlag{
+						Name:    "config",
+						Aliases: []string{"c"},
+						Value:   "config.yaml",
+						Usage:   "Configuration file path",
+					},
+					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
 					},
@@ -165,6 +177,12 @@ func main() {
 				Usage:  "Show status of current/last run",
 				Action: showStatus,
 				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "config",
+						Aliases: []string{"c"},
+						Value:   "config.yaml",
+						Usage:   "Configuration file path",
+					},
 					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
@@ -185,6 +203,12 @@ func main() {
 				Action: validateMigration,
 				Flags: []cli.Flag{
 					&cli.StringFlag{
+						Name:    "config",
+						Aliases: []string{"c"},
+						Value:   "config.yaml",
+						Usage:   "Configuration file path",
+					},
+					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
 					},
@@ -198,6 +222,12 @@ func main() {
 				Name:  "history",
 				Usage: "List all migration runs, or view details of a specific run",
 				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "config",
+						Aliases: []string{"c"},
+						Value:   "config.yaml",
+						Usage:   "Configuration file path",
+					},
 					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
@@ -279,6 +309,12 @@ func main() {
 				Usage:  "Test database connections",
 				Action: healthCheck,
 				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "config",
+						Aliases: []string{"c"},
+						Value:   "config.yaml",
+						Usage:   "Configuration file path",
+					},
 					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",

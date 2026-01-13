@@ -1,0 +1,44 @@
+# WideWorldImporters MSSQL to MSSQL migration - AI Type Mapping Test
+# Source: mssql-wwi (port 1435)
+# Target: mssql-wwi-target (port 1436)
+
+source:
+  type: mssql
+  host: localhost
+  port: 1435
+  database: WideWorldImporters
+  user: sa
+  password: "YourStrong@Passw0rd"
+  schema: Sales
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: mssql
+  host: localhost
+  port: 1436
+  database: WideWorldImporters
+  user: sa
+  password: "YourStrong@Passw0rd"
+  schema: Sales
+  encrypt: false
+  trust_server_cert: true
+
+migration:
+  workers: 6
+  chunk_size: 50000
+  create_indexes: false
+  create_foreign_keys: false
+
+  # Exclude archive tables without PKs
+  exclude_tables:
+    - Customers_Archive
+    - BuyingGroups_Archive
+    - CustomerCategories_Archive
+
+# AI-assisted type mapping
+ai:
+  api_key: ${file:/home/johnd/.secrets/anthropic-api-key}
+  provider: claude
+  type_mapping:
+    enabled: true

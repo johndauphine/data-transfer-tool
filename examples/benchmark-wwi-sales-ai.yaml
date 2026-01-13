@@ -1,0 +1,43 @@
+# WideWorldImporters Sales schema migration - AI Type Mapping Test
+# Source: mssql-wwi (port 1435)
+# Target: pg-wwi (port 5435)
+
+source:
+  type: mssql
+  host: localhost
+  port: 1435
+  database: WideWorldImporters
+  user: sa
+  password: "YourStrong@Passw0rd"
+  schema: Sales
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5435
+  database: wideworldimporters
+  user: postgres
+  password: "PostgresPassword123"
+  schema: sales
+  ssl_mode: disable
+
+migration:
+  workers: 6
+  chunk_size: 50000
+  create_indexes: false
+  create_foreign_keys: false
+
+  # Exclude archive tables without PKs
+  exclude_tables:
+    - Customers_Archive
+    - BuyingGroups_Archive
+    - CustomerCategories_Archive
+
+# AI-assisted type mapping
+ai:
+  api_key: ${file:/home/johnd/.secrets/anthropic-api-key}
+  provider: claude
+  type_mapping:
+    enabled: true
