@@ -4,13 +4,16 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
+	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
+	// Import driver packages to register dialects
+	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/mssql"
+	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/postgres"
 )
 
 // Package-level dialect instances for identifier quoting
 var (
-	pgDialect    = dialect.GetDialect("postgres")
-	mssqlDialect = dialect.GetDialect("mssql")
+	pgDialect    = driver.GetDialect("postgres")
+	mssqlDialect = driver.GetDialect("mssql")
 )
 
 // quotePGIdent safely quotes a PostgreSQL identifier using the dialect package.

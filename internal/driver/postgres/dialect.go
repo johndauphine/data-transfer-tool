@@ -107,18 +107,17 @@ func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, _ string, hasMaxP
 		d.QuoteIdentifier(pkCol), dateClause, d.QuoteIdentifier(pkCol))
 }
 
-func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, dateFilter *driver.DateFilter) []any {
-	// Note: limit is now part of the query, not args
-	if maxPK != nil {
+func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, dateFilter *driver.DateFilter) []any {
+	if hasMaxPK {
 		if dateFilter != nil {
-			return []any{lastPK, maxPK, dateFilter.Timestamp}
+			return []any{lastPK, maxPK, limit, dateFilter.Timestamp}
 		}
-		return []any{lastPK, maxPK}
+		return []any{lastPK, maxPK, limit}
 	}
 	if dateFilter != nil {
-		return []any{lastPK, dateFilter.Timestamp}
+		return []any{lastPK, limit, dateFilter.Timestamp}
 	}
-	return []any{lastPK}
+	return []any{lastPK, limit}
 }
 
 func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string) string {
@@ -156,8 +155,8 @@ func extractColumnAliases(cols string) string {
 	return strings.Join(aliases, ", ")
 }
 
-func (d *Dialect) BuildRowNumberArgs(startRow, endRow int64) []any {
-	return []any{startRow, endRow}
+func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int) []any {
+	return []any{rowNum, rowNum + int64(limit)}
 }
 
 func (d *Dialect) PartitionBoundariesQuery(pkCol, schema, table string, numPartitions int) string {

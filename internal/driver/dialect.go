@@ -1,5 +1,20 @@
 package driver
 
+import (
+	"strings"
+	"time"
+)
+
+// DateFilter specifies a filter on a date/timestamp column for incremental sync.
+// This is defined here to avoid circular imports with the reader package.
+type DateFilter struct {
+	// Column is the name of the date column to filter on.
+	Column string
+
+	// Timestamp is the minimum value (rows where column > timestamp are included).
+	Timestamp time.Time
+}
+
 // Dialect abstracts database-specific SQL syntax differences.
 // Each database driver provides its own Dialect implementation.
 type Dialect interface {
@@ -43,13 +58,22 @@ type Dialect interface {
 	BuildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK bool, dateFilter *DateFilter) string
 
 	// BuildKeysetArgs builds arguments for a keyset pagination query.
-	BuildKeysetArgs(lastPK, maxPK any, dateFilter *DateFilter) []any
+	// Parameters:
+	//   - lastPK: the last primary key value from previous chunk
+	//   - maxPK: upper bound for PK range (nil if no upper bound)
+	//   - limit: number of rows to fetch
+	//   - hasMaxPK: whether maxPK is being used for bounded query
+	//   - dateFilter: optional date filter for incremental sync
+	BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, dateFilter *DateFilter) []any
 
 	// BuildRowNumberQuery builds a ROW_NUMBER pagination query.
 	BuildRowNumberQuery(cols, orderBy, schema, table, tableHint string) string
 
 	// BuildRowNumberArgs builds arguments for a ROW_NUMBER pagination query.
-	BuildRowNumberArgs(startRow, endRow int64) []any
+	// Parameters:
+	//   - rowNum: starting row number (0-indexed)
+	//   - limit: number of rows to fetch
+	BuildRowNumberArgs(rowNum int64, limit int) []any
 
 	// PartitionBoundariesQuery returns a query to get partition boundaries.
 	PartitionBoundariesQuery(pkCol, schema, table string, numPartitions int) string
@@ -63,4 +87,15 @@ type Dialect interface {
 
 	// ValidDateTypes returns a map of valid date/timestamp types.
 	ValidDateTypes() map[string]bool
+}
+
+// GetDialect returns the appropriate dialect for the given database type.
+// This uses the driver registry to get the dialect, eliminating switch statements.
+// Returns nil if no driver is registered for the given type.
+func GetDialect(dbType string) Dialect {
+	d, err := Get(strings.ToLower(dbType))
+	if err != nil {
+		return nil
+	}
+	return d.Dialect()
 }

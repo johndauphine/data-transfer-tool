@@ -66,15 +66,6 @@ type ReadOptions struct {
 	StrictConsistency bool
 }
 
-// DateFilter specifies a filter on a date/timestamp column for incremental sync.
-type DateFilter struct {
-	// Column is the name of the date column to filter on.
-	Column string
-
-	// Timestamp is the minimum value (rows where column > timestamp are included).
-	Timestamp time.Time
-}
-
 // Batch represents a batch of rows read from the source.
 type Batch struct {
 	// Rows contains the data, where each row is a slice of column values.

@@ -4,6 +4,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
+	// Import driver packages to register dialects
+	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/mssql"
+	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/postgres"
 )
 
 func TestGetDialect(t *testing.T) {
@@ -15,12 +20,14 @@ func TestGetDialect(t *testing.T) {
 		{"postgresql", "postgres"},
 		{"mssql", "mssql"},
 		{"sqlserver", "mssql"},
-		{"", "mssql"}, // default
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.dbType, func(t *testing.T) {
 			d := GetDialect(tt.dbType)
+			if d == nil {
+				t.Fatalf("GetDialect(%q) returned nil", tt.dbType)
+			}
 			if d.DBType() != tt.wantType {
 				t.Errorf("GetDialect(%q).DBType() = %q, want %q", tt.dbType, d.DBType(), tt.wantType)
 			}
@@ -28,17 +35,34 @@ func TestGetDialect(t *testing.T) {
 	}
 }
 
+func TestGetDialect_UnknownType(t *testing.T) {
+	// Unknown or empty database types should return nil
+	tests := []string{"", "unknown", "mysql", "oracle"}
+
+	for _, dbType := range tests {
+		t.Run(dbType, func(t *testing.T) {
+			d := GetDialect(dbType)
+			if d != nil {
+				t.Errorf("GetDialect(%q) = %v, want nil for unregistered type", dbType, d)
+			}
+		})
+	}
+}
+
 func TestQuoteIdentifier(t *testing.T) {
+	pgDialect := driver.GetDialect("postgres")
+	mssqlDialect := driver.GetDialect("mssql")
+
 	tests := []struct {
 		name     string
 		dialect  Dialect
 		input    string
 		expected string
 	}{
-		{"postgres simple", &PostgresDialect{}, "users", `"users"`},
-		{"postgres with quote", &PostgresDialect{}, `user"name`, `"user""name"`},
-		{"mssql simple", &MSSQLDialect{}, "users", "[users]"},
-		{"mssql with bracket", &MSSQLDialect{}, "user]name", "[user]]name]"},
+		{"postgres simple", pgDialect, "users", `"users"`},
+		{"postgres with quote", pgDialect, `user"name`, `"user""name"`},
+		{"mssql simple", mssqlDialect, "users", "[users]"},
+		{"mssql with bracket", mssqlDialect, "user]name", "[user]]name]"},
 	}
 
 	for _, tt := range tests {
@@ -52,6 +76,9 @@ func TestQuoteIdentifier(t *testing.T) {
 }
 
 func TestQualifyTable(t *testing.T) {
+	pgDialect := driver.GetDialect("postgres")
+	mssqlDialect := driver.GetDialect("mssql")
+
 	tests := []struct {
 		name     string
 		dialect  Dialect
@@ -59,8 +86,8 @@ func TestQualifyTable(t *testing.T) {
 		table    string
 		expected string
 	}{
-		{"postgres", &PostgresDialect{}, "public", "users", `"public"."users"`},
-		{"mssql", &MSSQLDialect{}, "dbo", "users", "[dbo].[users]"},
+		{"postgres", pgDialect, "public", "users", `"public"."users"`},
+		{"mssql", mssqlDialect, "dbo", "users", "[dbo].[users]"},
 	}
 
 	for _, tt := range tests {
@@ -76,13 +103,13 @@ func TestQualifyTable(t *testing.T) {
 func TestColumnList(t *testing.T) {
 	cols := []string{"id", "name", "email"}
 
-	pgDialect := &PostgresDialect{}
+	pgDialect := driver.GetDialect("postgres")
 	pgResult := pgDialect.ColumnList(cols)
 	if pgResult != `"id", "name", "email"` {
 		t.Errorf("PostgreSQL ColumnList = %q, want %q", pgResult, `"id", "name", "email"`)
 	}
 
-	mssqlDialect := &MSSQLDialect{}
+	mssqlDialect := driver.GetDialect("mssql")
 	mssqlResult := mssqlDialect.ColumnList(cols)
 	if mssqlResult != "[id], [name], [email]" {
 		t.Errorf("MSSQL ColumnList = %q, want %q", mssqlResult, "[id], [name], [email]")
@@ -90,12 +117,12 @@ func TestColumnList(t *testing.T) {
 }
 
 func TestTableHint(t *testing.T) {
-	pgDialect := &PostgresDialect{}
+	pgDialect := driver.GetDialect("postgres")
 	if pgDialect.TableHint(false) != "" {
 		t.Error("PostgreSQL TableHint should be empty")
 	}
 
-	mssqlDialect := &MSSQLDialect{}
+	mssqlDialect := driver.GetDialect("mssql")
 	if mssqlDialect.TableHint(false) != "WITH (NOLOCK)" {
 		t.Error("MSSQL TableHint should be WITH (NOLOCK)")
 	}
@@ -105,6 +132,9 @@ func TestTableHint(t *testing.T) {
 }
 
 func TestColumnListForSelect_CrossEngine(t *testing.T) {
+	pgDialect := driver.GetDialect("postgres")
+	mssqlDialect := driver.GetDialect("mssql")
+
 	tests := []struct {
 		name         string
 		dialect      Dialect
@@ -115,7 +145,7 @@ func TestColumnListForSelect_CrossEngine(t *testing.T) {
 	}{
 		{
 			name:         "postgres to mssql with geography",
-			dialect:      &PostgresDialect{},
+			dialect:      pgDialect,
 			cols:         []string{"id", "name", "location"},
 			colTypes:     []string{"int", "text", "geography"},
 			targetDBType: "mssql",
@@ -123,7 +153,7 @@ func TestColumnListForSelect_CrossEngine(t *testing.T) {
 		},
 		{
 			name:         "mssql to postgres with geography",
-			dialect:      &MSSQLDialect{},
+			dialect:      mssqlDialect,
 			cols:         []string{"id", "name", "location"},
 			colTypes:     []string{"int", "nvarchar", "geography"},
 			targetDBType: "postgres",
@@ -131,7 +161,7 @@ func TestColumnListForSelect_CrossEngine(t *testing.T) {
 		},
 		{
 			name:         "same engine - no conversion",
-			dialect:      &PostgresDialect{},
+			dialect:      pgDialect,
 			cols:         []string{"id", "location"},
 			colTypes:     []string{"int", "geography"},
 			targetDBType: "postgres",
@@ -152,8 +182,8 @@ func TestColumnListForSelect_CrossEngine(t *testing.T) {
 }
 
 func TestBuildKeysetQuery(t *testing.T) {
-	pgDialect := &PostgresDialect{}
-	mssqlDialect := &MSSQLDialect{}
+	pgDialect := driver.GetDialect("postgres")
+	mssqlDialect := driver.GetDialect("mssql")
 
 	// PostgreSQL keyset query
 	pgQuery := pgDialect.BuildKeysetQuery("id, name", "id", "public", "users", "", true, nil)
@@ -176,8 +206,8 @@ func TestBuildKeysetQuery(t *testing.T) {
 }
 
 func TestBuildKeysetArgs(t *testing.T) {
-	pgDialect := &PostgresDialect{}
-	mssqlDialect := &MSSQLDialect{}
+	pgDialect := driver.GetDialect("postgres")
+	mssqlDialect := driver.GetDialect("mssql")
 
 	// PostgreSQL args
 	pgArgs := pgDialect.BuildKeysetArgs(100, 200, 1000, true, nil)
@@ -193,8 +223,8 @@ func TestBuildKeysetArgs(t *testing.T) {
 }
 
 func TestBuildRowNumberQuery(t *testing.T) {
-	pgDialect := &PostgresDialect{}
-	mssqlDialect := &MSSQLDialect{}
+	pgDialect := driver.GetDialect("postgres")
+	mssqlDialect := driver.GetDialect("mssql")
 
 	pgQuery := pgDialect.BuildRowNumberQuery("id, name", "id", "public", "users", "")
 	if !strings.Contains(pgQuery, "ROW_NUMBER()") || !strings.Contains(pgQuery, "__rn") {
@@ -208,7 +238,7 @@ func TestBuildRowNumberQuery(t *testing.T) {
 }
 
 func TestBuildDSN(t *testing.T) {
-	pgDialect := &PostgresDialect{}
+	pgDialect := driver.GetDialect("postgres")
 	pgDSN := pgDialect.BuildDSN("localhost", 5432, "testdb", "user", "pass", map[string]any{
 		"sslmode": "disable",
 	})
@@ -216,7 +246,7 @@ func TestBuildDSN(t *testing.T) {
 		t.Errorf("PostgreSQL DSN unexpected format: %s", pgDSN)
 	}
 
-	mssqlDialect := &MSSQLDialect{}
+	mssqlDialect := driver.GetDialect("mssql")
 	mssqlDSN := mssqlDialect.BuildDSN("localhost", 1433, "testdb", "user", "pass", map[string]any{
 		"encrypt":                false,
 		"trustServerCertificate": true,
@@ -228,28 +258,28 @@ func TestBuildDSN(t *testing.T) {
 }
 
 func TestPartitionBoundariesQuery(t *testing.T) {
-	pgDialect := &PostgresDialect{}
-	mssqlDialect := &MSSQLDialect{}
+	pgDialect := driver.GetDialect("postgres")
+	mssqlDialect := driver.GetDialect("mssql")
 
-	pgQuery := pgDialect.PartitionBoundariesQuery("id", 4)
+	pgQuery := pgDialect.PartitionBoundariesQuery("id", "public", "users", 4)
 	if !strings.Contains(pgQuery, "NTILE(4)") || !strings.Contains(pgQuery, "partition_id") {
 		t.Errorf("PostgreSQL partition query unexpected: %s", pgQuery)
 	}
 
-	mssqlQuery := mssqlDialect.PartitionBoundariesQuery("id", 4)
+	mssqlQuery := mssqlDialect.PartitionBoundariesQuery("id", "dbo", "users", 4)
 	if !strings.Contains(mssqlQuery, "NTILE(4)") || !strings.Contains(mssqlQuery, "[id]") {
 		t.Errorf("MSSQL partition query unexpected: %s", mssqlQuery)
 	}
 }
 
 func TestValidDateTypes(t *testing.T) {
-	pgDialect := &PostgresDialect{}
+	pgDialect := driver.GetDialect("postgres")
 	pgTypes := pgDialect.ValidDateTypes()
 	if !pgTypes["timestamp"] || !pgTypes["timestamptz"] {
 		t.Error("PostgreSQL missing expected date types")
 	}
 
-	mssqlDialect := &MSSQLDialect{}
+	mssqlDialect := driver.GetDialect("mssql")
 	mssqlTypes := mssqlDialect.ValidDateTypes()
 	if !mssqlTypes["datetime"] || !mssqlTypes["datetime2"] {
 		t.Error("MSSQL missing expected date types")

@@ -448,10 +448,9 @@ func (r *Reader) readKeysetPagination(ctx context.Context, batches chan<- driver
 		}
 
 		queryStart := time.Now()
-		query := r.dialect.BuildKeysetQuery(cols, pkCol, opts.Table.Schema, opts.Table.Name, tableHint, maxPK != nil, opts.DateFilter)
-
-		args := []any{sql.Named("limit", opts.ChunkSize)}
-		args = append(args, r.dialect.BuildKeysetArgs(lastPK, maxPK, opts.DateFilter)...)
+		hasMaxPK := maxPK != nil
+		query := r.dialect.BuildKeysetQuery(cols, pkCol, opts.Table.Schema, opts.Table.Name, tableHint, hasMaxPK, opts.DateFilter)
+		args := r.dialect.BuildKeysetArgs(lastPK, maxPK, opts.ChunkSize, hasMaxPK, opts.DateFilter)
 
 		rows, err := r.db.QueryContext(ctx, query, args...)
 		queryTime := time.Since(queryStart)
@@ -513,14 +512,15 @@ func (r *Reader) readRowNumberPagination(ctx context.Context, batches chan<- dri
 		default:
 		}
 
-		batchEnd := currentRow + int64(opts.ChunkSize)
-		if batchEnd > endRow {
-			batchEnd = endRow
+		// Calculate batch size (may be smaller at end of partition)
+		batchSize := opts.ChunkSize
+		if currentRow+int64(batchSize) > endRow {
+			batchSize = int(endRow - currentRow)
 		}
 
 		queryStart := time.Now()
 		query := r.dialect.BuildRowNumberQuery(cols, orderBy, opts.Table.Schema, opts.Table.Name, tableHint)
-		args := r.dialect.BuildRowNumberArgs(currentRow, batchEnd)
+		args := r.dialect.BuildRowNumberArgs(currentRow, batchSize)
 
 		rows, err := r.db.QueryContext(ctx, query, args...)
 		queryTime := time.Since(queryStart)
@@ -541,7 +541,7 @@ func (r *Reader) readRowNumberPagination(ctx context.Context, batches chan<- dri
 		batch.Stats.QueryTime = queryTime
 		batch.RowNum = currentRow
 
-		currentRow = batchEnd
+		currentRow += int64(len(batch.Rows))
 
 		if currentRow >= endRow || len(batch.Rows) == 0 {
 			batch.Done = true

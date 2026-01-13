@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
-	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
+	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/pool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
@@ -28,8 +28,8 @@ type ProgressSaver interface {
 	GetProgress(taskID int64) (lastPK any, rowsDone int64, err error)
 }
 
-// DateFilter is an alias for dialect.DateFilter for backward compatibility
-type DateFilter = dialect.DateFilter
+// DateFilter is an alias for driver.DateFilter for backward compatibility
+type DateFilter = driver.DateFilter
 
 // Job represents a data transfer job
 type Job struct {
@@ -430,7 +430,10 @@ func executeKeysetPagination(
 	pkCol := job.Table.PrimaryKey[0]
 
 	// Use dialect for database-specific SQL syntax
-	srcDialect := dialect.GetDialect(srcPool.DBType())
+	srcDialect := driver.GetDialect(srcPool.DBType())
+	if srcDialect == nil {
+		return nil, fmt.Errorf("no dialect registered for source DB type %s", srcPool.DBType())
+	}
 	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
 	tableHint := srcDialect.TableHint(cfg.Migration.StrictConsistency)
 	chunkSize := cfg.Migration.ChunkSize
@@ -695,7 +698,10 @@ func executeRowNumberPagination(
 	stats := &TransferStats{}
 
 	// Use dialect for database-specific SQL syntax
-	srcDialect := dialect.GetDialect(srcPool.DBType())
+	srcDialect := driver.GetDialect(srcPool.DBType())
+	if srcDialect == nil {
+		return nil, fmt.Errorf("no dialect registered for source DB type %q", srcPool.DBType())
+	}
 	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
 	tableHint := srcDialect.TableHint(cfg.Migration.StrictConsistency)
 

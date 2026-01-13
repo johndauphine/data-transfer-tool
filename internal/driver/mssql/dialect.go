@@ -111,9 +111,10 @@ func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, tableHint string,
 	`, cols, d.QualifyTable(schema, table), tableHint, pkCol, dateClause, pkCol)
 }
 
-func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, dateFilter *driver.DateFilter) []any {
-	if maxPK != nil {
+func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, dateFilter *driver.DateFilter) []any {
+	if hasMaxPK {
 		args := []any{
+			sql.Named("limit", limit),
 			sql.Named("lastPK", lastPK),
 			sql.Named("maxPK", maxPK),
 		}
@@ -123,6 +124,7 @@ func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, dateFilter *driver.DateFilt
 		return args
 	}
 	args := []any{
+		sql.Named("limit", limit),
 		sql.Named("lastPK", lastPK),
 	}
 	if dateFilter != nil {
@@ -166,10 +168,10 @@ func extractColumnAliases(cols string) string {
 	return strings.Join(aliases, ", ")
 }
 
-func (d *Dialect) BuildRowNumberArgs(startRow, endRow int64) []any {
+func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int) []any {
 	return []any{
-		sql.Named("rowNum", startRow),
-		sql.Named("rowNumEnd", endRow),
+		sql.Named("rowNum", rowNum),
+		sql.Named("rowNumEnd", rowNum+int64(limit)),
 	}
 }
 
