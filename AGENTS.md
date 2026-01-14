@@ -36,5 +36,7 @@
 
 ## Configuration & Secrets
 - Use `config.yaml.example` as the starting point; keep real credentials out of the repo.
-- AI features are enabled via `ai.api_key` and env vars such as `ANTHROPIC_API_KEY`.
-- Encrypted profiles use `DMT_MASTER_KEY`; document any required secrets in the PR description.
+- Sensitive credentials (API keys, encryption keys, webhook URLs) should be stored in `~/.secrets/dmt-config.yaml`.
+- AI provider configuration uses the secrets file for API keys and provider settings.
+- Slack webhook URLs should be stored in the secrets file under `notifications.slack.webhook_url`.
+- Encrypted profiles use the master key from secrets file; document any required secrets in the PR description.

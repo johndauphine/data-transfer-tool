@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/johndauphine/dmt/internal/secrets"
 )
 
 // boolPtr returns a pointer to a bool value for use in tests.
@@ -1175,5 +1177,164 @@ func TestSanitizedWithNilAIConfig(t *testing.T) {
 	sanitized := cfg.Sanitized()
 	if sanitized.AI != nil {
 		t.Error("Expected AI to remain nil")
+	}
+}
+
+func TestSlackWebhookFromSecrets(t *testing.T) {
+	tests := []struct {
+		name              string
+		configYAML        string
+		secretsYAML       string
+		createSecretsFile bool
+		expectedWebhook   string
+		expectWarning     bool // For invalid secrets file
+	}{
+		{
+			name: "webhook loaded from secrets when not in config",
+			configYAML: `
+source:
+  type: mssql
+  host: localhost
+  database: test
+target:
+  type: postgres
+  host: localhost
+  database: test
+slack:
+  enabled: true
+  channel: "#test"
+`,
+			secretsYAML: `
+ai:
+  default_provider: claude
+  providers:
+    claude:
+      api_key: "test-key"
+encryption:
+  master_key: "test-master-key"
+notifications:
+  slack:
+    webhook_url: "https://hooks.slack.com/services/TEST/FROM/SECRETS"
+`,
+			createSecretsFile: true,
+			expectedWebhook:   "https://hooks.slack.com/services/TEST/FROM/SECRETS",
+		},
+		{
+			name: "config webhook takes precedence over secrets",
+			configYAML: `
+source:
+  type: mssql
+  host: localhost
+  database: test
+target:
+  type: postgres
+  host: localhost
+  database: test
+slack:
+  enabled: true
+  channel: "#test"
+  webhook_url: "https://hooks.slack.com/services/TEST/FROM/CONFIG"
+`,
+			secretsYAML: `
+ai:
+  default_provider: claude
+  providers:
+    claude:
+      api_key: "test-key"
+encryption:
+  master_key: "test-master-key"
+notifications:
+  slack:
+    webhook_url: "https://hooks.slack.com/services/TEST/FROM/SECRETS"
+`,
+			createSecretsFile: true,
+			expectedWebhook:   "https://hooks.slack.com/services/TEST/FROM/CONFIG",
+		},
+		{
+			name: "no secrets file - webhook remains empty",
+			configYAML: `
+source:
+  type: mssql
+  host: localhost
+  database: test
+target:
+  type: postgres
+  host: localhost
+  database: test
+slack:
+  enabled: true
+  channel: "#test"
+`,
+			createSecretsFile: false,
+			expectedWebhook:   "",
+		},
+		{
+			name: "slack disabled - no webhook loading attempted",
+			configYAML: `
+source:
+  type: mssql
+  host: localhost
+  database: test
+target:
+  type: postgres
+  host: localhost
+  database: test
+slack:
+  enabled: false
+`,
+			secretsYAML: `
+ai:
+  default_provider: claude
+  providers:
+    claude:
+      api_key: "test-key"
+encryption:
+  master_key: "test-master-key"
+notifications:
+  slack:
+    webhook_url: "https://hooks.slack.com/services/TEST/FROM/SECRETS"
+`,
+			createSecretsFile: true,
+			expectedWebhook:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			// Create config file
+			configPath := filepath.Join(tmpDir, "config.yaml")
+			if err := os.WriteFile(configPath, []byte(tt.configYAML), 0600); err != nil {
+				t.Fatalf("failed to create config file: %v", err)
+			}
+
+			// Override secrets file location for this test
+			if tt.createSecretsFile {
+				secretsPath := filepath.Join(tmpDir, "secrets.yaml")
+				if err := os.WriteFile(secretsPath, []byte(tt.secretsYAML), 0600); err != nil {
+					t.Fatalf("failed to create secrets file: %v", err)
+				}
+				os.Setenv("DMT_SECRETS_FILE", secretsPath)
+			} else {
+				// Point to non-existent file to prevent loading user's actual secrets
+				os.Setenv("DMT_SECRETS_FILE", filepath.Join(tmpDir, "nonexistent.yaml"))
+			}
+			defer func() {
+				os.Unsetenv("DMT_SECRETS_FILE")
+				secrets.Reset() // Reset secrets cache for next test
+			}()
+
+			// Load config
+			cfg, err := Load(configPath)
+			if err != nil {
+				t.Fatalf("failed to load config: %v", err)
+			}
+
+			// Verify webhook URL
+			if cfg.Slack.WebhookURL != tt.expectedWebhook {
+				t.Errorf("expected webhook URL %q, got %q", tt.expectedWebhook, cfg.Slack.WebhookURL)
+			}
+		})
 	}
 }
