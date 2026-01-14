@@ -12,6 +12,7 @@ import (
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/secrets"
 	"gopkg.in/yaml.v3"
 
 	// Import driver packages to trigger init() registration before validation
@@ -607,6 +608,19 @@ func (c *Config) applyDefaults() {
 		if c.AI.TypeMapping.Enabled == nil {
 			enabled := true
 			c.AI.TypeMapping.Enabled = &enabled
+		}
+	}
+
+	// Slack notification: load webhook from secrets if not provided in config
+	if c.Slack.Enabled && c.Slack.WebhookURL == "" {
+		secretsCfg, err := secrets.Load()
+		if err != nil {
+			// Distinguish between "secrets file not found" (acceptable) and other errors (should be reported)
+			if _, ok := err.(*secrets.SecretsNotFoundError); !ok {
+				logging.Warn("failed to load secrets configuration for Slack webhook: %v", err)
+			}
+		} else if secretsCfg.Notifications.Slack.WebhookURL != "" {
+			c.Slack.WebhookURL = secretsCfg.Notifications.Slack.WebhookURL
 		}
 	}
 }
