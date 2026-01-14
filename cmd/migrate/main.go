@@ -1034,9 +1034,10 @@ func runCalibration(c *cli.Context) error {
 	}
 
 	// Create pools
+	const minCalibrationConns = 10
 	maxConns := cfg.Migration.Workers * 2
-	if maxConns < 10 {
-		maxConns = 10
+	if maxConns < minCalibrationConns {
+		maxConns = minCalibrationConns
 	}
 
 	sourcePool, err := pool.NewSourcePool(&cfg.Source, maxConns)
@@ -1053,8 +1054,10 @@ func runCalibration(c *cli.Context) error {
 	}
 
 	// Use AI mapper as type mapper, or create a minimal one if no AI
-	var typeMapper driver.TypeMapper = aiMapper
-	if typeMapper == nil {
+	var typeMapper driver.TypeMapper
+	if aiMapper != nil {
+		typeMapper = aiMapper
+	} else {
 		// Fall back to getting default type mapper
 		typeMapper, err = driver.GetAITypeMapper()
 		if err != nil {

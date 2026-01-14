@@ -14,6 +14,14 @@ import (
 	"github.com/johndauphine/dmt/internal/pool"
 )
 
+const (
+	// minRowsForCalibration is the minimum row count for a table to be useful for calibration.
+	minRowsForCalibration = 1000
+
+	// calibrationRunTimeout is the maximum duration for a single calibration run.
+	calibrationRunTimeout = 5 * time.Minute
+)
+
 // Calibrator runs calibration tests to find optimal configuration.
 type Calibrator struct {
 	config        *config.Config
@@ -303,7 +311,7 @@ func (c *Calibrator) selectTables(ctx context.Context) error {
 		if !t.SupportsKeysetPagination() {
 			continue // Need integer PK
 		}
-		if t.RowCount < 1000 {
+		if t.RowCount < minRowsForCalibration {
 			continue // Need enough rows for meaningful test
 		}
 		candidates = append(candidates, t)
@@ -337,7 +345,7 @@ func (c *Calibrator) executeRun(ctx context.Context, cfg *CalibrationConfig) Run
 	}
 
 	// Create timeout context for this run
-	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	runCtx, cancel := context.WithTimeout(ctx, calibrationRunTimeout)
 	defer cancel()
 
 	startTime := time.Now()

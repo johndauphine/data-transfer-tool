@@ -108,12 +108,13 @@ func (sm *SchemaManager) DropSchema(ctx context.Context) error {
 				logging.Warn("Failed to drop table %s.%s: %v", sm.schemaName, tableName, err)
 			}
 		}
-		// Then drop schema
+		// Then drop schema (escape single quotes for safety)
+		escapedName := strings.ReplaceAll(sm.schemaName, "'", "''")
 		query = fmt.Sprintf(`
-			IF EXISTS (SELECT 1 FROM sys.schemas WHERE name = '%s')
+			IF EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'%s')
 			BEGIN
 				DROP SCHEMA [%s]
-			END`, sm.schemaName, sm.schemaName)
+			END`, escapedName, sm.schemaName)
 	default:
 		return fmt.Errorf("unsupported database type for schema cleanup: %s", sm.dbType)
 	}
