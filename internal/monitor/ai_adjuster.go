@@ -230,6 +230,8 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 			update.ParallelReaders = &value
 		case "read_ahead_buffers":
 			update.ReadAheadBuffers = &value
+		default:
+			logging.Info("AIAdjuster: unknown adjustment parameter %q (value=%d); ignoring", param, value)
 		}
 	}
 

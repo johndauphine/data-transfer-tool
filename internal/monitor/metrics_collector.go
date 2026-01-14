@@ -210,7 +210,7 @@ func (mc *MetricsCollector) AnalyzeTrends() TrendAnalysis {
 	}
 
 	// Memory trend (>5% increase per sample)
-	if len(recent) >= 2 {
+	if len(recent) >= 3 {
 		memIncrease1 := float64(recent[1].MemoryUsedMB-recent[0].MemoryUsedMB) / float64(max(1, recent[0].MemoryUsedMB))
 		memIncrease2 := float64(recent[2].MemoryUsedMB-recent[1].MemoryUsedMB) / float64(max(1, recent[1].MemoryUsedMB))
 		if memIncrease1 > 0.05 && memIncrease2 > 0.05 {
