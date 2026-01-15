@@ -85,7 +85,10 @@ func (r AIAdjustmentRecord) AdjustmentsJSON() string {
 	if r.Adjustments == nil {
 		return "{}"
 	}
-	b, _ := json.Marshal(r.Adjustments)
+	b, err := json.Marshal(r.Adjustments)
+	if err != nil {
+		return "{}"
+	}
 	return string(b)
 }
 

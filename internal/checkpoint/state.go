@@ -188,7 +188,7 @@ func (s *State) migrate() error {
 
 	CREATE TABLE IF NOT EXISTS ai_adjustments (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		run_id TEXT NOT NULL REFERENCES runs(id),
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
 		adjustment_number INTEGER NOT NULL,
 		timestamp TEXT NOT NULL,
 		action TEXT NOT NULL,

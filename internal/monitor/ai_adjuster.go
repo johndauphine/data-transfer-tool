@@ -16,6 +16,12 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
+const (
+	// effectivenessThreshold defines the minimum percentage improvement
+	// for an adjustment to be considered effective
+	effectivenessThreshold = 5.0
+)
+
 // AdjustmentDecision represents AI's recommendation for parameter adjustments.
 type AdjustmentDecision struct {
 	Action      string         `json:"action"` // "continue", "scale_up", "scale_down", "reduce_chunk", etc.
@@ -27,6 +33,7 @@ type AdjustmentDecision struct {
 
 // AdjustmentRecord tracks a past adjustment and its effect.
 type AdjustmentRecord struct {
+	AdjustmentNumber int
 	Timestamp        time.Time
 	Action           string
 	Adjustments      map[string]int
@@ -363,7 +370,7 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 				stats := actionStats[h.Action]
 				stats.count++
 				stats.totalEffect += h.EffectPercent
-				if h.EffectPercent > 5 { // >5% improvement = effective
+				if h.EffectPercent > effectivenessThreshold {
 					stats.effective++
 				}
 				actionStats[h.Action] = stats
@@ -512,6 +519,7 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 
 	// Record in history (we'll update the effect later)
 	record := AdjustmentRecord{
+		AdjustmentNumber: aa.adjustmentCount,
 		Timestamp:        time.Now(),
 		Action:           decision.Action,
 		Adjustments:      decision.Adjustments,
@@ -577,10 +585,9 @@ func (aa *AIAdjuster) measureAdjustmentEffect(historyIndex int) {
 
 	// Update database with effect measurement
 	if aa.state != nil && aa.runID != "" {
-		// Calculate adjustment number (historyIndex may not match due to sliding window)
-		adjustmentNum := aa.adjustmentCount - (len(aa.adjustmentHistory) - 1 - historyIndex)
+		// Use the original adjustment number captured at initial save time
 		dbRecord := checkpoint.AIAdjustmentRecord{
-			AdjustmentNumber: adjustmentNum,
+			AdjustmentNumber: record.AdjustmentNumber,
 			Timestamp:        record.Timestamp,
 			Action:           record.Action,
 			Adjustments:      record.Adjustments,
