@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +18,18 @@ import (
 
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/secrets"
+)
+
+// Retry configuration constants
+const (
+	// defaultMaxRetries is the default number of retry attempts for transient failures.
+	defaultMaxRetries = 3
+
+	// defaultBaseDelay is the initial delay between retries.
+	defaultBaseDelay = 1 * time.Second
+
+	// defaultMaxDelay is the maximum delay between retries (cap for exponential backoff).
+	defaultMaxDelay = 10 * time.Second
 )
 
 // AIProvider represents supported AI providers for type mapping.
@@ -456,6 +471,168 @@ func sanitizeErrorResponse(body []byte, maxLen int) string {
 	return s
 }
 
+// isRetryableError determines if an error is transient and should be retried.
+// Returns true for network timeouts, connection errors, and server errors (5xx).
+func isRetryableError(err error, statusCode int) bool {
+	// Check for retryable HTTP status codes (server errors, rate limiting)
+	if statusCode >= 500 || statusCode == 429 {
+		return true
+	}
+
+	if err == nil {
+		return false
+	}
+
+	// Check for context deadline exceeded (timeout)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// Check for network errors
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		// Retry on timeout or temporary network errors
+		return netErr.Timeout()
+	}
+
+	// Check for connection errors
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+
+	// Check for common retryable error messages
+	errMsg := strings.ToLower(err.Error())
+	retryablePatterns := []string{
+		"tls handshake timeout",
+		"connection reset",
+		"connection refused",
+		"eof",
+		"broken pipe",
+		"no such host",
+		"temporary failure",
+		"i/o timeout",
+	}
+	for _, pattern := range retryablePatterns {
+		if strings.Contains(errMsg, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// retryableHTTPDo executes an HTTP request with exponential backoff retry logic.
+// It retries on transient network errors and server errors (5xx, 429).
+func (m *AITypeMapper) retryableHTTPDo(ctx context.Context, reqFunc func() (*http.Request, error)) (*http.Response, []byte, error) {
+	var lastErr error
+	var lastStatusCode int
+
+	for attempt := 0; attempt <= defaultMaxRetries; attempt++ {
+		// Check context before each attempt
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+
+		// Create fresh request for each attempt
+		req, err := reqFunc()
+		if err != nil {
+			return nil, nil, fmt.Errorf("creating request: %w", err)
+		}
+
+		// Execute request
+		resp, err := m.client.Do(req)
+		if err != nil {
+			lastErr = err
+			lastStatusCode = 0
+
+			if !isRetryableError(err, 0) {
+				return nil, nil, fmt.Errorf("API request failed: %w", err)
+			}
+
+			// Log retry attempt
+			if attempt < defaultMaxRetries {
+				delay := calculateBackoff(attempt)
+				logging.Debug("AI API request failed (attempt %d/%d): %v, retrying in %v",
+					attempt+1, defaultMaxRetries+1, err, delay)
+
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				}
+			}
+			continue
+		}
+
+		// Read response body
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if readErr != nil {
+			lastErr = readErr
+			if attempt < defaultMaxRetries {
+				delay := calculateBackoff(attempt)
+				logging.Debug("AI API response read failed (attempt %d/%d): %v, retrying in %v",
+					attempt+1, defaultMaxRetries+1, readErr, delay)
+
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				}
+			}
+			continue
+		}
+
+		lastStatusCode = resp.StatusCode
+
+		// Check for retryable status codes
+		if isRetryableError(nil, resp.StatusCode) {
+			lastErr = fmt.Errorf("API returned status %d", resp.StatusCode)
+
+			if attempt < defaultMaxRetries {
+				delay := calculateBackoff(attempt)
+				logging.Debug("AI API returned status %d (attempt %d/%d), retrying in %v",
+					resp.StatusCode, attempt+1, defaultMaxRetries+1, delay)
+
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				}
+			}
+			continue
+		}
+
+		// Success or non-retryable error
+		return resp, body, nil
+	}
+
+	// All retries exhausted
+	if lastErr != nil {
+		return nil, nil, fmt.Errorf("API request failed after %d attempts: %w", defaultMaxRetries+1, lastErr)
+	}
+	return nil, nil, fmt.Errorf("API request failed after %d attempts (status %d)", defaultMaxRetries+1, lastStatusCode)
+}
+
+// calculateBackoff returns the delay for a given retry attempt using exponential backoff with jitter.
+func calculateBackoff(attempt int) time.Duration {
+	// Exponential backoff: baseDelay * 2^attempt
+	delay := defaultBaseDelay * time.Duration(1<<attempt)
+
+	// Cap at max delay
+	if delay > defaultMaxDelay {
+		delay = defaultMaxDelay
+	}
+
+	// Add jitter (±25% randomization to prevent thundering herd)
+	jitter := time.Duration(rand.Int63n(int64(delay) / 2))
+	delay = delay - delay/4 + jitter
+
+	return delay
+}
+
 func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (string, error) {
 	model := m.provider.GetEffectiveModel(m.providerName)
 	reqBody := claudeRequest{
@@ -471,24 +648,19 @@ func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (strin
 		return "", fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(jsonBody))
+	// Use retry logic for transient failures
+	resp, body, err := m.retryableHTTPDo(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(jsonBody))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", m.provider.APIKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		return req, nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", m.provider.APIKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
+		return "", err
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -552,23 +724,18 @@ func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string, url st
 		return "", fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	// Use retry logic for transient failures
+	resp, body, err := m.retryableHTTPDo(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+m.provider.APIKey)
+		return req, nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.provider.APIKey)
-
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
+		return "", err
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -609,23 +776,20 @@ func (m *AITypeMapper) queryOpenAICompatAPI(ctx context.Context, prompt string, 
 		return "", fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
-	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
-	}
+	providerName := m.providerName // capture for closure
 
-	req.Header.Set("Content-Type", "application/json")
-	// No Authorization header for local providers
-
-	resp, err := m.client.Do(req)
+	// Use retry logic for transient failures
+	resp, body, err := m.retryableHTTPDo(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		// No Authorization header for local providers
+		return req, nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("API request failed (is %s running?): %w", m.providerName, err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
+		return "", fmt.Errorf("API request failed (is %s running?): %w", providerName, err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -703,23 +867,18 @@ func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (strin
 	model := m.provider.GetEffectiveModel(m.providerName)
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", model)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	// Use retry logic for transient failures
+	resp, body, err := m.retryableHTTPDo(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-goog-api-key", m.provider.APIKey)
+		return req, nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-goog-api-key", m.provider.APIKey)
-
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
+		return "", err
 	}
 
 	if resp.StatusCode != http.StatusOK {

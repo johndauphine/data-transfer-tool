@@ -2,12 +2,14 @@ package driver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/secrets"
 )
@@ -614,5 +616,209 @@ func TestAITypeMapper_CachePersistence(t *testing.T) {
 	val, ok := mapper2.cache.Get("test:key:1")
 	if !ok || val != "varchar(100)" {
 		t.Errorf("expected 'varchar(100)', got '%s'", val)
+	}
+}
+
+// Tests for retry logic
+
+func TestIsRetryableError(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		statusCode int
+		expected   bool
+	}{
+		{"nil error, success status", nil, 200, false},
+		{"nil error, server error 500", nil, 500, true},
+		{"nil error, server error 502", nil, 502, true},
+		{"nil error, rate limit 429", nil, 429, true},
+		{"nil error, client error 400", nil, 400, false},
+		{"nil error, unauthorized 401", nil, 401, false},
+		{"TLS handshake timeout", errWithMessage("TLS handshake timeout"), 0, true},
+		{"connection reset", errWithMessage("connection reset by peer"), 0, true},
+		{"connection refused", errWithMessage("connection refused"), 0, true},
+		{"EOF error", errWithMessage("unexpected EOF"), 0, true},
+		{"i/o timeout", errWithMessage("i/o timeout"), 0, true},
+		{"broken pipe", errWithMessage("broken pipe"), 0, true},
+		{"no such host", errWithMessage("no such host"), 0, true},
+		{"temporary failure", errWithMessage("temporary failure in name resolution"), 0, true},
+		{"random error", errWithMessage("some random error"), 0, false},
+		{"authentication error", errWithMessage("invalid API key"), 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isRetryableError(tt.err, tt.statusCode)
+			if result != tt.expected {
+				t.Errorf("isRetryableError(%v, %d) = %v, want %v", tt.err, tt.statusCode, result, tt.expected)
+			}
+		})
+	}
+}
+
+// errWithMessage creates a simple error with the given message
+type simpleError string
+
+func (e simpleError) Error() string { return string(e) }
+
+func errWithMessage(msg string) error {
+	return simpleError(msg)
+}
+
+func TestCalculateBackoff(t *testing.T) {
+	// Test that backoff increases with attempts
+	delay0 := calculateBackoff(0)
+	delay1 := calculateBackoff(1)
+	delay2 := calculateBackoff(2)
+
+	// With jitter, we can only check approximate ranges
+	// Base delay is 1s, so:
+	// attempt 0: ~0.75s - 1.25s (1s ± 25% jitter)
+	// attempt 1: ~1.5s - 2.5s (2s ± 25% jitter)
+	// attempt 2: ~3s - 5s (4s ± 25% jitter)
+
+	if delay0 < 500*time.Millisecond || delay0 > 2*time.Second {
+		t.Errorf("delay0 = %v, want between 500ms and 2s", delay0)
+	}
+
+	if delay1 < 1*time.Second || delay1 > 3*time.Second {
+		t.Errorf("delay1 = %v, want between 1s and 3s", delay1)
+	}
+
+	if delay2 < 2*time.Second || delay2 > 6*time.Second {
+		t.Errorf("delay2 = %v, want between 2s and 6s", delay2)
+	}
+
+	// Test max delay cap (10s)
+	delay10 := calculateBackoff(10)
+	if delay10 > 15*time.Second {
+		t.Errorf("delay10 = %v, should be capped near 10s", delay10)
+	}
+}
+
+func TestRetryableHTTPDo_Success(t *testing.T) {
+	// Create a test server that returns success
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success": true}`))
+	}))
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper.client = server.Client()
+
+	ctx := context.Background()
+	resp, body, err := mapper.retryableHTTPDo(ctx, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, "POST", server.URL, bytes.NewReader([]byte(`{}`)))
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200, got %d", resp.StatusCode)
+	}
+	if !bytes.Contains(body, []byte("success")) {
+		t.Errorf("unexpected body: %s", body)
+	}
+	if callCount != 1 {
+		t.Errorf("expected 1 call, got %d", callCount)
+	}
+}
+
+func TestRetryableHTTPDo_RetryOn500(t *testing.T) {
+	// Create a test server that fails twice then succeeds
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error": "internal error"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success": true}`))
+	}))
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper.client = server.Client()
+
+	ctx := context.Background()
+	resp, body, err := mapper.retryableHTTPDo(ctx, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, "POST", server.URL, bytes.NewReader([]byte(`{}`)))
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200, got %d", resp.StatusCode)
+	}
+	if !bytes.Contains(body, []byte("success")) {
+		t.Errorf("unexpected body: %s", body)
+	}
+	if callCount != 3 {
+		t.Errorf("expected 3 calls (2 retries), got %d", callCount)
+	}
+}
+
+func TestRetryableHTTPDo_ExhaustedRetries(t *testing.T) {
+	// Create a test server that always fails
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": "always fails"}`))
+	}))
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper.client = server.Client()
+
+	ctx := context.Background()
+	_, _, err := mapper.retryableHTTPDo(ctx, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, "POST", server.URL, bytes.NewReader([]byte(`{}`)))
+	})
+
+	if err == nil {
+		t.Error("expected error after exhausted retries")
+	}
+	// Should have tried defaultMaxRetries + 1 times
+	expectedCalls := defaultMaxRetries + 1
+	if callCount != expectedCalls {
+		t.Errorf("expected %d calls, got %d", expectedCalls, callCount)
+	}
+}
+
+func TestRetryableHTTPDo_NoRetryOn400(t *testing.T) {
+	// Create a test server that returns 400 (client error, not retryable)
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error": "bad request"}`))
+	}))
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper.client = server.Client()
+
+	ctx := context.Background()
+	resp, _, err := mapper.retryableHTTPDo(ctx, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, "POST", server.URL, bytes.NewReader([]byte(`{}`)))
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", resp.StatusCode)
+	}
+	// Should not retry on 400
+	if callCount != 1 {
+		t.Errorf("expected 1 call (no retries for 400), got %d", callCount)
 	}
 }
