@@ -205,9 +205,15 @@ func (mc *MetricsCollector) AnalyzeTrends() TrendAnalysis {
 	// Throughput trend (>20% decline - significant threshold to avoid over-adjusting)
 	if recent[0].Throughput > 0 && recent[2].Throughput > 0 {
 		decline := (recent[0].Throughput - recent[2].Throughput) / recent[0].Throughput
-		result.ThroughputDecline = decline * 100 // Store as percentage
-		if decline > 0.20 {
-			result.ThroughputDecreasing = true
+		if decline > 0 {
+			// Store positive decline as percentage; direction captured by ThroughputDecreasing
+			result.ThroughputDecline = decline * 100
+			if decline > 0.20 {
+				result.ThroughputDecreasing = true
+			}
+		} else {
+			// No decline (flat or increasing throughput)
+			result.ThroughputDecline = 0
 		}
 	}
 
