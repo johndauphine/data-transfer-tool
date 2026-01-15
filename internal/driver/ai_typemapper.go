@@ -369,7 +369,8 @@ func sanitizeSampleValue(value string) string {
 func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 	var sb strings.Builder
 	sb.WriteString("You are a database type mapping expert.\n\n")
-	sb.WriteString(fmt.Sprintf("Map this %s type to %s:\n", info.SourceDBType, info.TargetDBType))
+	sb.WriteString("Based on DDL metadata only (no sample data), ")
+	sb.WriteString(fmt.Sprintf("map this %s type to %s:\n", info.SourceDBType, info.TargetDBType))
 	sb.WriteString(fmt.Sprintf("- Type: %s\n", info.DataType))
 	if info.MaxLength > 0 {
 		sb.WriteString(fmt.Sprintf("- Max length: %d\n", info.MaxLength))
