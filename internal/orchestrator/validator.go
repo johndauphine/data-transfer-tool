@@ -4,13 +4,28 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/source"
 )
 
-// Validate checks row counts between source and target
+// ValidationTimeout is the maximum time to wait for a single table's row count query.
+const ValidationTimeout = 30 * time.Second
+
+// tableValidationResult holds the result of validating a single table.
+type tableValidationResult struct {
+	tableName   string
+	sourceCount int64
+	targetCount int64
+	err         error
+	timedOut    bool
+}
+
+// Validate checks row counts between source and target in parallel.
 func (o *Orchestrator) Validate(ctx context.Context) error {
 	if o.tables == nil {
 		tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
@@ -23,28 +38,53 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 	logging.Info("\nValidation Results:")
 	logging.Info("-------------------")
 
-	var failed bool
+	// Run validation for all tables in parallel
+	results := make(chan tableValidationResult, len(o.tables))
+	var wg sync.WaitGroup
+
 	for _, t := range o.tables {
-		// Query fresh counts from both source and target (don't use cached t.RowCount)
-		sourceCount, err := o.sourcePool.GetRowCount(ctx, o.config.Source.Schema, t.Name)
-		if err != nil {
-			logging.Error("%-30s ERROR getting source count: %v", t.Name, err)
+		wg.Add(1)
+		go func(table source.Table) {
+			defer wg.Done()
+			result := o.validateTable(ctx, table)
+			results <- result
+		}(t)
+	}
+
+	// Wait for all validations to complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	var allResults []tableValidationResult
+	for result := range results {
+		allResults = append(allResults, result)
+	}
+
+	// Sort results by table name for consistent output
+	sort.Slice(allResults, func(i, j int) bool {
+		return allResults[i].tableName < allResults[j].tableName
+	})
+
+	// Report results
+	var failed bool
+	for _, r := range allResults {
+		if r.timedOut {
+			logging.Warn("%-30s TIMEOUT (validation skipped after %v)", r.tableName, ValidationTimeout)
+			continue
+		}
+		if r.err != nil {
+			logging.Error("%-30s ERROR: %v", r.tableName, r.err)
 			failed = true
 			continue
 		}
-
-		targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
-		if err != nil {
-			logging.Error("%-30s ERROR getting target count: %v", t.Name, err)
-			failed = true
-			continue
-		}
-
-		if targetCount == sourceCount {
-			logging.Info("%-30s OK %d rows", t.Name, targetCount)
+		if r.targetCount == r.sourceCount {
+			logging.Info("%-30s OK %d rows", r.tableName, r.targetCount)
 		} else {
 			logging.Error("%-30s FAIL source=%d target=%d (diff=%d)",
-				t.Name, sourceCount, targetCount, sourceCount-targetCount)
+				r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
 			failed = true
 		}
 	}
@@ -53,6 +93,41 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 		return fmt.Errorf("validation failed")
 	}
 	return nil
+}
+
+// validateTable validates a single table's row count with timeout.
+func (o *Orchestrator) validateTable(ctx context.Context, t source.Table) tableValidationResult {
+	result := tableValidationResult{tableName: t.Name}
+
+	// Create timeout context for this table's validation
+	timeoutCtx, cancel := context.WithTimeout(ctx, ValidationTimeout)
+	defer cancel()
+
+	// Query source count
+	sourceCount, err := o.sourcePool.GetRowCount(timeoutCtx, o.config.Source.Schema, t.Name)
+	if err != nil {
+		if timeoutCtx.Err() == context.DeadlineExceeded {
+			result.timedOut = true
+			return result
+		}
+		result.err = fmt.Errorf("source count: %w", err)
+		return result
+	}
+	result.sourceCount = sourceCount
+
+	// Query target count
+	targetCount, err := o.targetPool.GetRowCount(timeoutCtx, o.config.Target.Schema, t.Name)
+	if err != nil {
+		if timeoutCtx.Err() == context.DeadlineExceeded {
+			result.timedOut = true
+			return result
+		}
+		result.err = fmt.Errorf("target count: %w", err)
+		return result
+	}
+	result.targetCount = targetCount
+
+	return result
 }
 
 // validateSamples performs sample data validation by comparing random rows
