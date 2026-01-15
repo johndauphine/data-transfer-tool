@@ -10,6 +10,7 @@ import (
 	// Import driver packages to trigger init() registration
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
 	_ "github.com/johndauphine/dmt/internal/driver/mysql"
+	_ "github.com/johndauphine/dmt/internal/driver/oracle"
 	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
