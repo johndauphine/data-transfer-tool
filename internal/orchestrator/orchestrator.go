@@ -387,7 +387,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		}
 
 		// Sample rows for AI type mapping context (one query per table for all columns)
-		if aiMappingEnabled {
+		// DISABLED: For privacy, AI type mapping now works without sample data
+		if false && aiMappingEnabled {
 			columnNames := make([]string, len(t.Columns))
 			for j := range t.Columns {
 				columnNames[j] = t.Columns[j].Name
