@@ -5,7 +5,7 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/johndauphine/dmt)](https://go.dev/)
 [![License](https://img.shields.io/github/license/johndauphine/dmt)](LICENSE)
 
-High-performance CLI tool for bidirectional database migration between Microsoft SQL Server and PostgreSQL.
+High-performance CLI tool for database migrations between SQL Server, PostgreSQL, MySQL, and Oracle.
 
 ## Interactive Mode (New!)
 
@@ -687,14 +687,16 @@ sensor = PythonSensor(
 - **Auto-tuning** based on CPU cores and available RAM
 - **2-6x faster** than equivalent Python/Airflow solutions
 
-## Supported Directions
+## Supported Databases
 
-| Source | Target | Write Method |
-|--------|--------|--------------|
-| SQL Server | PostgreSQL | COPY protocol (fastest) |
-| PostgreSQL | SQL Server | TDS bulk copy |
-| PostgreSQL | PostgreSQL | COPY protocol |
-| SQL Server | SQL Server | TDS bulk copy |
+| Database | As Source | As Target | Write Method |
+|----------|-----------|-----------|--------------|
+| PostgreSQL | ✓ | ✓ | COPY protocol (fastest) |
+| SQL Server | ✓ | ✓ | TDS bulk copy |
+| MySQL | ✓ | ✓ | Multi-row INSERT |
+| Oracle 12c+ | ✓ | ✓ | godror.Batch array binding |
+
+All combinations are supported (e.g., MSSQL→Oracle, MySQL→PostgreSQL, Oracle→MySQL).
 
 ### Same-Engine Migrations (New in v1.43.0)
 
@@ -881,13 +883,13 @@ The `source` section configures the database to migrate FROM.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `type` | No | `mssql` | Database type: `mssql` or `postgres` |
+| `type` | No | `mssql` | Database type: `mssql`, `postgres`, `mysql`, or `oracle` |
 | `host` | **Yes** | - | Database server hostname or IP address |
-| `port` | No | 1433 (mssql) / 5432 (postgres) | Database server port |
-| `database` | **Yes** | - | Database name to connect to |
+| `port` | No | Auto | Database server port (1433/5432/3306/1521) |
+| `database` | **Yes** | - | Database name (or service name for Oracle) |
 | `user` | Yes* | - | Username for authentication (*not required for Kerberos) |
 | `password` | Yes* | - | Password for authentication (*not required for Kerberos). Supports `${ENV_VAR}` syntax |
-| `schema` | No | `dbo` (mssql) / `public` (postgres) | Schema containing tables to migrate |
+| `schema` | No | Auto | Schema containing tables to migrate |
 
 **SSL/TLS Settings (source):**
 
@@ -915,13 +917,13 @@ The `target` section configures the database to migrate TO. It uses the same par
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `type` | No | `postgres` | Database type: `mssql` or `postgres` |
+| `type` | No | `postgres` | Database type: `mssql`, `postgres`, `mysql`, or `oracle` |
 | `host` | **Yes** | - | Database server hostname or IP address |
-| `port` | No | 5432 (postgres) / 1433 (mssql) | Database server port |
-| `database` | **Yes** | - | Database name to connect to |
+| `port` | No | Auto | Database server port (5432/1433/3306/1521) |
+| `database` | **Yes** | - | Database name (or service name for Oracle) |
 | `user` | Yes* | - | Username for authentication |
 | `password` | Yes* | - | Password for authentication |
-| `schema` | No | `public` (postgres) / `dbo` (mssql) | Target schema for migrated tables |
+| `schema` | No | Auto | Target schema for migrated tables |
 
 The same SSL/TLS and Kerberos settings are available for `target`.
 
@@ -989,6 +991,7 @@ The `migration` section controls how data is transferred.
 | `write_ahead_writers` | No | 2 | Parallel writers per job. Use 8 for PG→MSSQL |
 | `parallel_readers` | No | 2 | Parallel readers per job. Use 1 for local databases |
 | `mssql_rows_per_batch` | No | Same as `chunk_size` | SQL Server bulk copy batch size hint |
+| `oracle_batch_size` | No | 5000 | Oracle godror.Batch limit (optimal: 5000-10000) |
 
 ### AI Settings
 
@@ -1091,6 +1094,7 @@ Ready-to-use example configuration files are available in the [`examples/`](exam
 | `config-mssql-to-pg-kerberos.yaml` | SQL Server → PostgreSQL with Kerberos |
 | `config-pg-to-mssql.yaml` | PostgreSQL → SQL Server with password auth |
 | `config-pg-to-mssql-kerberos.yaml` | PostgreSQL → SQL Server with Kerberos |
+| `config-mssql-to-oracle.yaml` | SQL Server → Oracle |
 | `config-local.yaml` | Minimal config for local Docker development |
 | `config-production.yaml` | Full production config with all options |
 
@@ -1235,7 +1239,49 @@ migration:
   parallel_readers: 1
 ```
 
-### Example 5: Minimal Configuration (Local Development)
+### Example 5: SQL Server to Oracle
+
+Migration from SQL Server to Oracle Database:
+
+```yaml
+# config-mssql-to-oracle.yaml
+source:
+  type: mssql
+  host: sqlserver.example.com
+  port: 1433
+  database: SourceDatabase
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: "true"
+  trust_server_cert: false
+
+target:
+  type: oracle
+  host: oracle.example.com
+  port: 1521
+  database: ORCL                       # Oracle service name
+  user: migrate_user
+  password: ${ORACLE_PASSWORD}
+  schema: MIGRATE_USER                 # Oracle schema (usually uppercase)
+
+migration:
+  workers: 4
+  chunk_size: 50000
+  oracle_batch_size: 5000              # Optimal for godror.Batch
+  create_indexes: true
+  create_foreign_keys: true
+
+ai:
+  api_key: ${ANTHROPIC_API_KEY}        # Required for type mapping
+```
+
+**Oracle requirements:**
+- Oracle Instant Client must be installed and in `LD_LIBRARY_PATH`
+- Target schema must exist before migration
+- User must have CREATE TABLE, CREATE SEQUENCE privileges
+
+### Example 6: Minimal Configuration (Local Development)
 
 Simplest config for local Docker databases:
 
@@ -1259,7 +1305,7 @@ target:
   ssl_mode: disable                  # Disable SSL for local dev
 ```
 
-### Example 6: Production Configuration with All Options
+### Example 7: Production Configuration with All Options
 
 Full production configuration with Slack notifications and validation:
 
@@ -1509,6 +1555,34 @@ Identity columns are mapped to `GENERATED BY DEFAULT AS IDENTITY` with proper se
 | json/jsonb | nvarchar(max) |
 
 Serial/identity columns are mapped to `IDENTITY(1,1)` with proper seed reset.
+
+### Oracle Type Mapping
+
+Oracle uses AI-assisted type mapping for cross-engine migrations. Common mappings:
+
+| Source Type | Oracle Type |
+|-------------|-------------|
+| int/integer | NUMBER(10) |
+| bigint | NUMBER(19) |
+| smallint | NUMBER(5) |
+| boolean/bit | NUMBER(1) |
+| decimal/numeric | NUMBER(p,s) |
+| float/double | BINARY_DOUBLE |
+| varchar/text | VARCHAR2(n) or CLOB |
+| char | CHAR(n) |
+| date | DATE |
+| timestamp | TIMESTAMP |
+| timestamptz | TIMESTAMP WITH TIME ZONE |
+| uuid | RAW(16) or VARCHAR2(36) |
+| bytea/varbinary | BLOB |
+| json/jsonb | CLOB |
+
+Identity columns use `GENERATED BY DEFAULT AS IDENTITY` (Oracle 12c+).
+
+**Oracle-specific notes:**
+- Identifier limit: 30 characters (pre-12.2) or 128 characters (12.2+)
+- Long identifiers are automatically truncated with a hash suffix for uniqueness
+- Requires Oracle Instant Client for the godror driver
 
 ### Unknown Types
 
