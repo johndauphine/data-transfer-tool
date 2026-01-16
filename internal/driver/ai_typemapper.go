@@ -720,7 +720,7 @@ type openAIRequest struct {
 	Messages    []openAIMessage        `json:"messages"`
 	MaxTokens   int                    `json:"max_tokens"`
 	Temperature float64                `json:"temperature"`
-	Options     map[string]interface{} `json:"options,omitempty"` // Ollama-specific options
+	Options     map[string]interface{} `json:"options,omitempty"` // Provider-specific options (e.g., Ollama's num_ctx for context window size)
 }
 
 type openAIMessage struct {

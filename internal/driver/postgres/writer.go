@@ -50,6 +50,7 @@ type Writer struct {
 	sourceType string
 	dialect    *Dialect
 	typeMapper driver.TypeMapper
+	cachedDB   *sql.DB // Cached database/sql wrapper for tuning analysis
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -104,6 +105,9 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 
 // Close closes all connections.
 func (w *Writer) Close() {
+	if w.cachedDB != nil {
+		w.cachedDB.Close()
+	}
 	w.pool.Close()
 }
 
@@ -113,10 +117,13 @@ func (w *Writer) Ping(ctx context.Context) error {
 }
 
 // DB returns a database/sql connection for tuning analysis.
-// Note: This creates a new connection from the pool config.
+// The connection is cached and reused across calls to avoid resource leaks.
 func (w *Writer) DB() *sql.DB {
-	// Create stdlib connector from pool config
-	return stdlib.OpenDBFromPool(w.pool)
+	if w.cachedDB == nil {
+		// Create stdlib connector from pool config (only once)
+		w.cachedDB = stdlib.OpenDBFromPool(w.pool)
+	}
+	return w.cachedDB
 }
 
 // MaxConns returns the configured maximum connections.

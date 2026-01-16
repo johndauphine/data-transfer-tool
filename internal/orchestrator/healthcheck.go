@@ -178,19 +178,17 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 		return nil, fmt.Errorf("analyzing config: %w", err)
 	}
 
-	// Add database tuning recommendations
-	o.addDatabaseTuningRecommendations(ctx, suggestions)
+	// Add database tuning recommendations using the same AI mapper
+	o.addDatabaseTuningRecommendations(ctx, suggestions, aiMapper)
 
 	return suggestions, nil
 }
 
 // addDatabaseTuningRecommendations adds source and target database tuning recommendations.
-func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, suggestions *driver.SmartConfigSuggestions) {
-	// Get AI mapper (required for database tuning - no fallback)
-	aiMapper, err := driver.NewAITypeMapperFromSecrets()
-	if err != nil {
-		// AI not configured - that's fine, just skip tuning analysis
-		aiMapper = nil
+func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, suggestions *driver.SmartConfigSuggestions, aiMapper *driver.AITypeMapper) {
+	// AI mapper is passed from AnalyzeConfig to avoid refetching
+	if aiMapper == nil {
+		return
 	}
 
 	// Schema statistics for recommendations
