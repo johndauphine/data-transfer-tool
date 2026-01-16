@@ -112,18 +112,28 @@ Output format (JSON array of strings):
 	}
 	logging.Debug("AI response (SQL generation):\n%s", response)
 
+	// Strip markdown code fences if present
+	cleanResponse := response
+	if strings.Contains(response, "```json") {
+		cleanResponse = strings.ReplaceAll(response, "```json", "")
+		cleanResponse = strings.ReplaceAll(cleanResponse, "```", "")
+	}
+	cleanResponse = strings.TrimSpace(cleanResponse)
+
 	// Parse JSON array of SQL queries
 	var queries []string
 	// Try to extract JSON from response
-	jsonStart := strings.Index(response, "[")
-	jsonEnd := strings.LastIndex(response, "]")
+	jsonStart := strings.Index(cleanResponse, "[")
+	jsonEnd := strings.LastIndex(cleanResponse, "]")
 	if jsonStart >= 0 && jsonEnd > jsonStart {
-		jsonStr := response[jsonStart : jsonEnd+1]
+		jsonStr := cleanResponse[jsonStart : jsonEnd+1]
 		if err := json.Unmarshal([]byte(jsonStr), &queries); err != nil {
+			logging.Debug("Failed to parse JSON array, length: %d", len(jsonStr))
 			return nil, fmt.Errorf("parsing AI response: %w", err)
 		}
 	} else {
-		return nil, fmt.Errorf("AI response did not contain JSON array: %s", response)
+		logging.Debug("No JSON array found in response, length: %d", len(cleanResponse))
+		return nil, fmt.Errorf("AI response did not contain JSON array")
 	}
 
 	logging.Debug("Parsed %d SQL queries from AI response:", len(queries))
