@@ -92,7 +92,6 @@ Requirements:
 4. For MSSQL: Use sp_configure, sys.dm_os_sys_info DMVs
 5. For Oracle: Query V$PARAMETER, V$SYSTEM_PARAMETER
 
-Return ONLY valid SQL queries, one per line, no explanations.
 Focus on settings relevant for %s database in migration workloads:
 - Buffer pools and caches
 - I/O settings
@@ -101,8 +100,13 @@ Focus on settings relevant for %s database in migration workloads:
 - Parallel processing
 - Memory settings
 
-Output format (JSON array of strings):
-["SQL query 1", "SQL query 2", ...]`, role, dbType, role)
+IMPORTANT: Return ONLY a JSON array of SQL query strings, no other text.
+
+Output format:
+["SQL query 1", "SQL query 2", ...]
+
+Example:
+["SELECT name, setting FROM pg_settings WHERE category = 'Resource Usage'", "SELECT * FROM pg_stat_database"]`, role, dbType, role)
 
 	logging.Debug("Sending AI prompt for SQL generation (%d bytes)", len(prompt))
 	response, err := a.aiMapper.Query(ctx, prompt)
@@ -122,6 +126,7 @@ Output format (JSON array of strings):
 
 	// Parse JSON array of SQL queries
 	var queries []string
+
 	// Try to extract JSON from response
 	jsonStart := strings.Index(cleanResponse, "[")
 	jsonEnd := strings.LastIndex(cleanResponse, "]")
@@ -132,8 +137,29 @@ Output format (JSON array of strings):
 			return nil, fmt.Errorf("parsing AI response: %w", err)
 		}
 	} else {
-		logging.Debug("No JSON array found in response, length: %d", len(cleanResponse))
-		return nil, fmt.Errorf("AI response did not contain JSON array")
+		// Fallback: Try to extract SQL queries from plain text (one per line)
+		logging.Debug("No JSON array found, trying plain text extraction")
+		lines := strings.Split(cleanResponse, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			// Skip empty lines and comments
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+				continue
+			}
+			// Look for SQL-like statements
+			upperLine := strings.ToUpper(line)
+			if strings.HasPrefix(upperLine, "SELECT") ||
+			   strings.HasPrefix(upperLine, "SHOW") ||
+			   strings.HasPrefix(upperLine, "EXEC") {
+				queries = append(queries, line)
+			}
+		}
+
+		if len(queries) == 0 {
+			logging.Debug("No SQL queries found in response, length: %d", len(cleanResponse))
+			return nil, fmt.Errorf("AI response did not contain SQL queries")
+		}
+		logging.Debug("Extracted %d SQL queries from plain text", len(queries))
 	}
 
 	logging.Debug("Parsed %d SQL queries from AI response:", len(queries))
