@@ -17,14 +17,14 @@ import (
 
 // Writer implements driver.Writer for Oracle Database.
 type Writer struct {
-	db            *sql.DB
-	config        *dbconfig.TargetConfig
-	maxConns      int
-	rowsPerBatch  int
-	sourceType    string
-	dialect       *Dialect
-	typeMapper    driver.TypeMapper
-	oracleVersion string
+	db              *sql.DB
+	config          *dbconfig.TargetConfig
+	maxConns        int
+	oracleBatchSize int
+	sourceType      string
+	dialect         *Dialect
+	typeMapper      driver.TypeMapper
+	oracleVersion   string
 }
 
 // NewWriter creates a new Oracle writer.
@@ -69,14 +69,14 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	}
 
 	return &Writer{
-		db:            db,
-		config:        cfg,
-		maxConns:      maxConns,
-		rowsPerBatch:  opts.RowsPerBatch,
-		sourceType:    opts.SourceType,
-		dialect:       dialect,
-		typeMapper:    opts.TypeMapper,
-		oracleVersion: version,
+		db:              db,
+		config:          cfg,
+		maxConns:        maxConns,
+		oracleBatchSize: opts.OracleBatchSize,
+		sourceType:      opts.SourceType,
+		dialect:         dialect,
+		typeMapper:      opts.TypeMapper,
+		oracleVersion:   version,
 	}, nil
 }
 
@@ -490,7 +490,7 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
 
 	// Process in batches - larger batches perform better with godror.Batch
-	batchSize := w.rowsPerBatch
+	batchSize := w.oracleBatchSize
 	if batchSize <= 0 {
 		batchSize = 5000 // Optimal batch size for Oracle bulk inserts
 	}
@@ -529,10 +529,14 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 	}
 	defer stmt.Close()
 
-	// godror.Batch with 5000 row limit provides optimal throughput
+	// godror.Batch limit from config (default 5000 provides optimal throughput)
+	batchLimit := w.oracleBatchSize
+	if batchLimit <= 0 {
+		batchLimit = 5000
+	}
 	batch := &godror.Batch{
 		Stmt:  stmt,
-		Limit: 5000,
+		Limit: batchLimit,
 	}
 
 	for _, row := range rows {
@@ -590,7 +594,7 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 	}
 
 	// Process in batches
-	batchSize := w.rowsPerBatch
+	batchSize := w.oracleBatchSize
 	if batchSize <= 0 {
 		batchSize = 200 // Smaller for MERGE complexity
 	}
