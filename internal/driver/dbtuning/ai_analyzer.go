@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/johndauphine/dmt/internal/logging"
 )
 
 // AIQuerier represents anything that can query AI.
@@ -43,22 +45,28 @@ func (a *AITuningAnalyzer) AnalyzeDatabase(
 	}
 
 	// Step 1: Use AI to generate SQL queries to interrogate database configuration
+	logging.Debug("Step 1: Requesting AI to generate interrogation SQL for %s %s database", role, dbType)
 	sqlQueries, err := a.generateInterrogationSQL(ctx, dbType, role)
 	if err != nil {
 		return nil, fmt.Errorf("generating interrogation SQL: %w", err)
 	}
+	logging.Debug("AI generated %d SQL queries", len(sqlQueries))
 
 	// Step 2: Execute the AI-generated SQL queries
+	logging.Debug("Step 2: Executing AI-generated SQL queries")
 	configData, err := a.executeConfigQueries(ctx, db, sqlQueries)
 	if err != nil {
 		return nil, fmt.Errorf("executing config queries: %w", err)
 	}
+	logging.Debug("Collected configuration data from %d queries", len(configData))
 
 	// Step 3: Use AI to analyze configuration and generate recommendations
+	logging.Debug("Step 3: Requesting AI to analyze configuration and generate recommendations")
 	recommendations, potential, impact, err := a.generateRecommendations(ctx, dbType, role, stats, configData)
 	if err != nil {
 		return nil, fmt.Errorf("generating recommendations: %w", err)
 	}
+	logging.Debug("AI generated %d recommendations (potential: %s)", len(recommendations), potential)
 
 	return &DatabaseTuning{
 		DatabaseType:    dbType,
@@ -96,10 +104,13 @@ Focus on settings relevant for %s database in migration workloads:
 Output format (JSON array of strings):
 ["SQL query 1", "SQL query 2", ...]`, role, dbType, role)
 
+	logging.Debug("Sending AI prompt (SQL generation):\n%s", prompt)
 	response, err := a.aiMapper.Query(ctx, prompt)
 	if err != nil {
+		logging.Debug("AI query failed: %v", err)
 		return nil, fmt.Errorf("AI query failed: %w", err)
 	}
+	logging.Debug("AI response (SQL generation):\n%s", response)
 
 	// Parse JSON array of SQL queries
 	var queries []string
@@ -115,6 +126,11 @@ Output format (JSON array of strings):
 		return nil, fmt.Errorf("AI response did not contain JSON array: %s", response)
 	}
 
+	logging.Debug("Parsed %d SQL queries from AI response:", len(queries))
+	for i, q := range queries {
+		logging.Debug("  Query %d: %s", i+1, q)
+	}
+
 	return queries, nil
 }
 
@@ -125,9 +141,11 @@ func (a *AITuningAnalyzer) executeConfigQueries(ctx context.Context, db *sql.DB,
 	for i, query := range queries {
 		queryKey := fmt.Sprintf("query_%d", i+1)
 
+		logging.Debug("Executing query %d: %s", i+1, query)
 		rows, err := db.QueryContext(ctx, query)
 		if err != nil {
 			// Log error but continue with other queries
+			logging.Debug("Query %d failed: %v", i+1, err)
 			config[queryKey+"_error"] = err.Error()
 			continue
 		}
@@ -169,8 +187,10 @@ func (a *AITuningAnalyzer) executeConfigQueries(ctx context.Context, db *sql.DB,
 		rows.Close()
 
 		config[queryKey] = results
+		logging.Debug("Query %d returned %d rows", i+1, len(results))
 	}
 
+	logging.Debug("Configuration data collection complete (%d successful queries)", len(config))
 	return config, nil
 }
 
@@ -239,10 +259,13 @@ Focus on:
 
 Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, stats.TotalRows, stats.AvgRowSizeBytes, stats.EstimatedMemMB, string(configJSON), role, role)
 
+	logging.Debug("Sending AI prompt (recommendations):\n%s", prompt)
 	response, err := a.aiMapper.Query(ctx, prompt)
 	if err != nil {
+		logging.Debug("AI query failed: %v", err)
 		return nil, "", "", fmt.Errorf("AI query failed: %w", err)
 	}
+	logging.Debug("AI response (recommendations):\n%s", response)
 
 	// Parse JSON response
 	type AIRecommendation struct {
