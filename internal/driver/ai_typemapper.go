@@ -716,10 +716,11 @@ func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (strin
 
 // OpenAI API types
 type openAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []openAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens"`
-	Temperature float64         `json:"temperature"`
+	Model       string                 `json:"model"`
+	Messages    []openAIMessage        `json:"messages"`
+	MaxTokens   int                    `json:"max_tokens"`
+	Temperature float64                `json:"temperature"`
+	Options     map[string]interface{} `json:"options,omitempty"` // Ollama-specific options
 }
 
 type openAIMessage struct {
@@ -739,14 +740,32 @@ type openAIResponse struct {
 }
 
 func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string, url string) (string, error) {
+	return m.queryOpenAIAPIWithTokens(ctx, prompt, url, 100)
+}
+
+// queryOpenAIAPIWithTokens queries OpenAI API with configurable max tokens.
+func (m *AITypeMapper) queryOpenAIAPIWithTokens(ctx context.Context, prompt string, url string, maxTokens int) (string, error) {
 	model := m.provider.GetEffectiveModel(m.providerName)
+
+	// Detect if this is a type mapping query (short, simple) vs general AI query (long, complex)
+	systemMsg := "You are a helpful AI assistant."
+	isTypeMapping := len(prompt) < 500 && maxTokens <= 100
+	if isTypeMapping {
+		systemMsg = "You are a database type mapping expert. Respond with only the target type, no explanation."
+	} else {
+		// For complex queries with OpenAI, use more tokens (costs more but necessary)
+		if maxTokens <= 100 {
+			maxTokens = 4000 // Reasonable default for analysis tasks
+		}
+	}
+
 	reqBody := openAIRequest{
 		Model: model,
 		Messages: []openAIMessage{
-			{Role: "system", Content: "You are a database type mapping expert. Respond with only the target type, no explanation."},
+			{Role: "system", Content: systemMsg},
 			{Role: "user", Content: prompt},
 		},
-		MaxTokens:   100,
+		MaxTokens:   maxTokens,
 		Temperature: 0,
 	}
 
@@ -791,15 +810,40 @@ func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string, url st
 
 // queryOpenAICompatAPI queries local providers using OpenAI-compatible API (no auth required).
 func (m *AITypeMapper) queryOpenAICompatAPI(ctx context.Context, prompt string, url string) (string, error) {
+	return m.queryOpenAICompatAPIWithTokens(ctx, prompt, url, 100)
+}
+
+// queryOpenAICompatAPIWithTokens queries local providers with configurable max tokens.
+func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, prompt string, url string, maxTokens int) (string, error) {
 	model := m.provider.GetEffectiveModel(m.providerName)
+
+	// Detect if this is a type mapping query (short, simple) vs general AI query (long, complex)
+	systemMsg := "You are a helpful AI assistant."
+	isTypeMapping := len(prompt) < 500 && maxTokens <= 100
+	if isTypeMapping {
+		systemMsg = "You are a database type mapping expert. Respond with only the target type, no explanation."
+	}
+
+	// For Ollama (local, free), use larger token budget for complex queries
+	if AIProvider(m.providerName) == ProviderOllama && !isTypeMapping {
+		maxTokens = 16000 // Allow longer responses for detailed analysis/recommendations
+	}
+
 	reqBody := openAIRequest{
 		Model: model,
 		Messages: []openAIMessage{
-			{Role: "system", Content: "You are a database type mapping expert. Respond with only the target type, no explanation."},
+			{Role: "system", Content: systemMsg},
 			{Role: "user", Content: prompt},
 		},
-		MaxTokens:   100,
+		MaxTokens:   maxTokens,
 		Temperature: 0,
+	}
+
+	// For Ollama, set larger context window to handle big prompts
+	if AIProvider(m.providerName) == ProviderOllama {
+		reqBody.Options = map[string]interface{}{
+			"num_ctx": 32768, // Use model's full 32K context capacity
+		}
 	}
 
 	jsonBody, err := json.Marshal(reqBody)

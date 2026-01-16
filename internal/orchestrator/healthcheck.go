@@ -222,8 +222,26 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 		}
 	}
 
-	// Note: Target tuning is skipped when SourceOnly option is used (e.g., in analyze command).
-	// Target tuning will be available when full orchestrator is created during migration.
+	// Analyze target database tuning using AI-driven approach
+	if o.targetPool != nil && o.targetPool.DB() != nil {
+		logging.Info("Analyzing target database configuration...")
+		targetTuning, err := dbtuning.Analyze(
+			ctx,
+			o.targetPool.DB(),
+			o.targetPool.DBType(),
+			"target",
+			stats,
+			aiMapper,
+		)
+		if err != nil {
+			logging.Warn("Failed to analyze target database tuning: %v", err)
+		} else {
+			suggestions.TargetTuning = targetTuning
+			if targetTuning.TuningPotential != "unknown" {
+				logging.Info("Target tuning: %s potential (%s)", targetTuning.TuningPotential, targetTuning.EstimatedImpact)
+			}
+		}
+	}
 }
 
 // Calibrate runs calibration tests to find optimal migration configuration.

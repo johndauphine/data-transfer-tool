@@ -135,7 +135,9 @@ Output format (JSON array of strings):
 }
 
 // executeConfigQueries executes SQL queries and collects configuration data.
+// Limits each query to maxRowsPerQuery to prevent token overflow.
 func (a *AITuningAnalyzer) executeConfigQueries(ctx context.Context, db *sql.DB, queries []string) (map[string]interface{}, error) {
+	const maxRowsPerQuery = 25 // Balance between config detail and prompt size
 	config := make(map[string]interface{})
 
 	for i, query := range queries {
@@ -157,9 +159,20 @@ func (a *AITuningAnalyzer) executeConfigQueries(ctx context.Context, db *sql.DB,
 			continue
 		}
 
-		// Collect all rows
+		// Collect rows up to limit
 		var results []map[string]interface{}
+		rowCount := 0
+		truncated := false
+
 		for rows.Next() {
+			rowCount++
+
+			// Stop collecting after limit, but continue counting
+			if rowCount > maxRowsPerQuery {
+				truncated = true
+				continue
+			}
+
 			// Create a slice of interface{} to hold each column value
 			values := make([]interface{}, len(columns))
 			valuePtrs := make([]interface{}, len(columns))
@@ -186,8 +199,21 @@ func (a *AITuningAnalyzer) executeConfigQueries(ctx context.Context, db *sql.DB,
 		}
 		rows.Close()
 
-		config[queryKey] = results
-		logging.Debug("Query %d returned %d rows", i+1, len(results))
+		// Store results with metadata about truncation
+		queryResult := map[string]interface{}{
+			"rows":      results,
+			"row_count": len(results),
+		}
+		if truncated {
+			queryResult["truncated"] = true
+			queryResult["total_rows"] = rowCount
+			logging.Debug("Query %d returned %d rows (truncated from %d total)", i+1, len(results), rowCount)
+		} else {
+			queryResult["truncated"] = false
+			logging.Debug("Query %d returned %d rows", i+1, len(results))
+		}
+
+		config[queryKey] = queryResult
 	}
 
 	logging.Debug("Configuration data collection complete (%d successful queries)", len(config))
@@ -220,6 +246,13 @@ Schema Statistics:
 
 Current Configuration:
 %s
+
+Note: Each query result includes metadata:
+- "rows": array of configuration data (limited to first 10 rows for token efficiency)
+- "row_count": number of rows returned
+- "truncated": true if more rows exist
+- "total_rows": total rows available (when truncated)
+Large result sets are heavily sampled; base recommendations on critical parameters only.
 
 Task: Analyze this configuration for a %s database in a migration tool (dmt).
 
@@ -287,17 +320,42 @@ Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, s
 		EstimatedImpact  string             `json:"estimated_impact"`
 	}
 
+	// Strip markdown code fences if present
+	cleanResponse := response
+	if strings.Contains(response, "```json") {
+		cleanResponse = strings.ReplaceAll(response, "```json", "")
+		cleanResponse = strings.ReplaceAll(cleanResponse, "```", "")
+	}
+	cleanResponse = strings.TrimSpace(cleanResponse)
+
 	// Extract JSON from response
-	jsonStart := strings.Index(response, "{")
-	jsonEnd := strings.LastIndex(response, "}")
+	jsonStart := strings.Index(cleanResponse, "{")
+	jsonEnd := strings.LastIndex(cleanResponse, "}")
 	if jsonStart < 0 || jsonEnd <= jsonStart {
-		return nil, "", "", fmt.Errorf("AI response did not contain JSON object: %s", response)
+		return nil, "", "", fmt.Errorf("AI response did not contain JSON object: %s", cleanResponse)
 	}
 
-	jsonStr := response[jsonStart : jsonEnd+1]
+	jsonStr := cleanResponse[jsonStart : jsonEnd+1]
+
+	// Try to parse JSON - if it fails due to truncation, try to fix it
 	var aiResp AIResponse
-	if err := json.Unmarshal([]byte(jsonStr), &aiResp); err != nil {
-		return nil, "", "", fmt.Errorf("parsing AI response: %w\nResponse: %s", err, jsonStr)
+	err = json.Unmarshal([]byte(jsonStr), &aiResp)
+	if err != nil {
+		// If parsing failed, it might be truncated - try to close the JSON properly
+		logging.Debug("JSON parse failed, attempting to fix truncated response: %v", err)
+
+		// Try adding missing closing brackets
+		fixedJSON := jsonStr
+		if !strings.HasSuffix(strings.TrimSpace(fixedJSON), "}") {
+			// Add closing braces for: current object, recommendations array, root object
+			fixedJSON = strings.TrimRight(fixedJSON, "\n\t ") + "]}}"
+		}
+
+		err = json.Unmarshal([]byte(fixedJSON), &aiResp)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("parsing AI response: %w\nOriginal: %s\nFixed: %s", err, jsonStr, fixedJSON)
+		}
+		logging.Debug("Successfully parsed truncated response with %d recommendations", len(aiResp.Recommendations))
 	}
 
 	// Convert AI recommendations to TuningRecommendation
@@ -317,5 +375,29 @@ Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, s
 		}
 	}
 
-	return recommendations, aiResp.TuningPotential, aiResp.EstimatedImpact, nil
+	// Handle missing fields in truncated responses
+	tuningPotential := aiResp.TuningPotential
+	if tuningPotential == "" && len(recommendations) > 0 {
+		// Infer potential from recommendation count and priorities
+		highPriorityCount := 0
+		for _, rec := range recommendations {
+			if rec.Priority == 1 {
+				highPriorityCount++
+			}
+		}
+		if highPriorityCount >= 3 {
+			tuningPotential = "high"
+		} else if highPriorityCount >= 1 {
+			tuningPotential = "medium"
+		} else {
+			tuningPotential = "low"
+		}
+	}
+
+	estimatedImpact := aiResp.EstimatedImpact
+	if estimatedImpact == "" && len(recommendations) > 0 {
+		estimatedImpact = fmt.Sprintf("%d tuning recommendations available (response may be truncated)", len(recommendations))
+	}
+
+	return recommendations, tuningPotential, estimatedImpact, nil
 }

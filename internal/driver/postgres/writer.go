@@ -3,12 +3,14 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"fmt"
 	"strings"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -108,6 +110,13 @@ func (w *Writer) Close() {
 // Ping tests the connection.
 func (w *Writer) Ping(ctx context.Context) error {
 	return w.pool.Ping(ctx)
+}
+
+// DB returns a database/sql connection for tuning analysis.
+// Note: This creates a new connection from the pool config.
+func (w *Writer) DB() *sql.DB {
+	// Create stdlib connector from pool config
+	return stdlib.OpenDBFromPool(w.pool)
 }
 
 // MaxConns returns the configured maximum connections.
