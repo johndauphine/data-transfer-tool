@@ -1901,11 +1901,8 @@ func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
 				return
 			}
 
-			// Create source-only orchestrator (no target connection needed)
-			opts := orchestrator.Options{
-				SourceOnly: true,
-			}
-			orch, err := orchestrator.NewWithOptions(cfg, opts)
+			// Create orchestrator with both source and target connections for full tuning analysis
+			orch, err := orchestrator.New(cfg)
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
 				return
