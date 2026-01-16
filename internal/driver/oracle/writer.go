@@ -363,6 +363,10 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 
 	if err != nil {
 		// Oracle 12.1 doesn't support RESTART - use INCREMENT BY workaround
+		// Note: This workaround has a small race condition window where other sessions
+		// could call NEXTVAL with the temporary INCREMENT BY value. This is acceptable
+		// because sequence reset runs during migration setup before concurrent access.
+
 		// Get current sequence value
 		var currVal int64
 		if err2 := w.db.QueryRowContext(ctx,
@@ -379,9 +383,20 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 		increment := nextVal - currVal - 1
 		if increment != 0 {
 			// Temporarily change INCREMENT BY, get NEXTVAL, then restore
-			_, _ = w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY %d", qualifiedSeq, increment))
-			_, _ = w.db.ExecContext(ctx, fmt.Sprintf("SELECT %s.NEXTVAL FROM DUAL", qualifiedSeq))
-			_, _ = w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY 1", qualifiedSeq))
+			if _, err := w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY %d", qualifiedSeq, increment)); err != nil {
+				logging.Warn("Failed to alter sequence %s increment: %v", seqName.String, err)
+				return nil
+			}
+			if _, err := w.db.ExecContext(ctx, fmt.Sprintf("SELECT %s.NEXTVAL FROM DUAL", qualifiedSeq)); err != nil {
+				logging.Warn("Failed to advance sequence %s: %v", seqName.String, err)
+				// Try to restore INCREMENT BY 1 before returning
+				w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY 1", qualifiedSeq))
+				return nil
+			}
+			if _, err := w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY 1", qualifiedSeq)); err != nil {
+				logging.Warn("Failed to restore sequence %s increment to 1: %v", seqName.String, err)
+				return nil
+			}
 		}
 		logging.Debug("Reset identity sequence %s to %d using INCREMENT BY workaround", seqName.String, nextVal)
 	}
