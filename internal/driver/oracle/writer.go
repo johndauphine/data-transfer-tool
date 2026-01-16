@@ -515,8 +515,7 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 		return nil
 	}
 
-	// Use godror.Batch for efficient bulk inserts
-	// This uses Oracle's native array binding for much better performance
+	// Use godror.Batch for efficient bulk inserts with native array binding
 	placeholders := make([]string, len(columns))
 	for i := range columns {
 		placeholders[i] = fmt.Sprintf(":%d", i+1)
@@ -530,8 +529,7 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 	}
 	defer stmt.Close()
 
-	// Use godror.Batch for efficient array binding
-	// 1000 rows provides optimal balance between throughput and memory
+	// godror.Batch provides optimal throughput with 1000 row batches
 	batch := &godror.Batch{
 		Stmt:  stmt,
 		Limit: 1000,
@@ -544,7 +542,6 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 		}
 	}
 
-	// Final flush for remaining rows
 	if err := batch.Flush(ctx); err != nil {
 		return fmt.Errorf("batch flush: %w", err)
 	}
