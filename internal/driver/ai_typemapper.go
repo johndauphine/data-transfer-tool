@@ -839,10 +839,11 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 		Temperature: 0,
 	}
 
-	// For Ollama, set larger context window to handle big prompts
+	// For Ollama, set context window from configuration (or use conservative default)
 	if AIProvider(m.providerName) == ProviderOllama {
+		contextWindow := m.provider.GetEffectiveContextWindow()
 		reqBody.Options = map[string]interface{}{
-			"num_ctx": 32768, // Use model's full 32K context capacity
+			"num_ctx": contextWindow, // Use configured context window (default: 8192)
 		}
 	}
 
