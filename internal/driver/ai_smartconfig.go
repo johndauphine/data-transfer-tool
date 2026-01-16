@@ -704,17 +704,21 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 	return sb.String()
 }
 
-// formatDatabaseTuning formats database tuning recommendations as YAML comments.
+// formatDatabaseTuning formats database tuning recommendations in a human-readable format.
 func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseTuning) string {
 	var sb strings.Builder
 
-	roleTitle := strings.Title(tuning.Role)
-	sb.WriteString(fmt.Sprintf("# %s Database Tuning Recommendations (%s)\n", roleTitle, strings.ToUpper(tuning.DatabaseType)))
+	// Header with visual separator
+	sb.WriteString("\n")
+	sb.WriteString("#" + strings.Repeat("=", 78) + "\n")
+	sb.WriteString(fmt.Sprintf("# %s DATABASE TUNING (%s)\n", strings.ToUpper(tuning.Role), strings.ToUpper(tuning.DatabaseType)))
+	sb.WriteString("#" + strings.Repeat("=", 78) + "\n")
 	sb.WriteString(fmt.Sprintf("# Tuning Potential: %s\n", strings.ToUpper(tuning.TuningPotential)))
-	sb.WriteString(fmt.Sprintf("# Estimated Impact: %s\n\n", tuning.EstimatedImpact))
+	sb.WriteString(fmt.Sprintf("# Impact: %s\n", tuning.EstimatedImpact))
+	sb.WriteString("#" + strings.Repeat("-", 78) + "\n\n")
 
 	if len(tuning.Recommendations) == 0 {
-		sb.WriteString(fmt.Sprintf("# No %s database tuning recommendations. Database is already well-tuned.\n\n", tuning.Role))
+		sb.WriteString(fmt.Sprintf("# ✓ No tuning needed - %s database is already well-configured!\n\n", tuning.Role))
 		return sb.String()
 	}
 
@@ -736,25 +740,28 @@ func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseT
 
 	// Format recommendations by priority
 	if len(priority1) > 0 {
-		sb.WriteString(fmt.Sprintf("# %s_tuning_critical:\n", tuning.Role))
-		for _, rec := range priority1 {
-			sb.WriteString(s.formatRecommendation(rec))
+		sb.WriteString("# 🔴 CRITICAL (Priority 1) - High Impact Changes\n")
+		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
+		for i, rec := range priority1 {
+			sb.WriteString(s.formatRecommendation(i+1, rec))
 		}
 		sb.WriteString("\n")
 	}
 
 	if len(priority2) > 0 {
-		sb.WriteString(fmt.Sprintf("# %s_tuning_important:\n", tuning.Role))
-		for _, rec := range priority2 {
-			sb.WriteString(s.formatRecommendation(rec))
+		sb.WriteString("# 🟡 IMPORTANT (Priority 2) - Medium Impact Changes\n")
+		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
+		for i, rec := range priority2 {
+			sb.WriteString(s.formatRecommendation(i+1, rec))
 		}
 		sb.WriteString("\n")
 	}
 
 	if len(priority3) > 0 {
-		sb.WriteString(fmt.Sprintf("# %s_tuning_optional:\n", tuning.Role))
-		for _, rec := range priority3 {
-			sb.WriteString(s.formatRecommendation(rec))
+		sb.WriteString("# 🟢 OPTIONAL (Priority 3) - Nice to Have\n")
+		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
+		for i, rec := range priority3 {
+			sb.WriteString(s.formatRecommendation(i+1, rec))
 		}
 		sb.WriteString("\n")
 	}
@@ -762,28 +769,78 @@ func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseT
 	return sb.String()
 }
 
-// formatRecommendation formats a single tuning recommendation.
-func (s *SmartConfigSuggestions) formatRecommendation(rec dbtuning.TuningRecommendation) string {
+// formatRecommendation formats a single tuning recommendation in a human-readable format.
+func (s *SmartConfigSuggestions) formatRecommendation(num int, rec dbtuning.TuningRecommendation) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("#   - parameter: %s\n", rec.Parameter))
-	sb.WriteString(fmt.Sprintf("#     current: %v\n", rec.CurrentValue))
-	sb.WriteString(fmt.Sprintf("#     recommended: %v\n", rec.RecommendedValue))
-	sb.WriteString(fmt.Sprintf("#     impact: %s\n", rec.Impact))
-	sb.WriteString(fmt.Sprintf("#     reason: %s\n", rec.Reason))
+	// Parameter name and number
+	sb.WriteString(fmt.Sprintf("#\n# %d. %s\n", num, rec.Parameter))
 
+	// Current vs Recommended (side by side for easy comparison)
+	sb.WriteString(fmt.Sprintf("#    Current:     %v\n", rec.CurrentValue))
+	sb.WriteString(fmt.Sprintf("#    Recommended: %v\n", rec.RecommendedValue))
+	sb.WriteString(fmt.Sprintf("#    Impact:      %s\n", strings.ToUpper(rec.Impact)))
+
+	// Wrap reason text to 75 characters for readability
+	sb.WriteString("#\n")
+	sb.WriteString("#    Why: " + s.wrapText(rec.Reason, 75, "#         ") + "\n")
+
+	// Show how to apply the change
 	if rec.CanApplyRuntime && rec.SQLCommand != "" {
-		sb.WriteString("#     apply: " + rec.SQLCommand + "\n")
-	} else if rec.RequiresRestart && rec.ConfigFile != "" {
-		// Indent config file lines
-		lines := strings.Split(rec.ConfigFile, "\n")
-		sb.WriteString("#     config:\n")
-		for _, line := range lines {
+		sb.WriteString("#\n")
+		sb.WriteString("#    ✓ Can apply at runtime (no restart needed):\n")
+		// Wrap long SQL commands
+		sqlLines := strings.Split(rec.SQLCommand, ";")
+		for _, line := range sqlLines {
+			line = strings.TrimSpace(line)
 			if line != "" {
-				sb.WriteString("#       " + line + "\n")
+				sb.WriteString("#      " + line + ";\n")
+			}
+		}
+	} else if rec.RequiresRestart {
+		sb.WriteString("#\n")
+		sb.WriteString("#    ⚠ Requires database restart\n")
+		if rec.ConfigFile != "" {
+			sb.WriteString("#    Add to config file:\n")
+			lines := strings.Split(rec.ConfigFile, "\n")
+			for _, line := range lines {
+				if line != "" {
+					sb.WriteString("#      " + line + "\n")
+				}
 			}
 		}
 	}
 
 	return sb.String()
+}
+
+// wrapText wraps text to maxWidth characters with the given prefix for continuation lines
+func (s *SmartConfigSuggestions) wrapText(text string, maxWidth int, contPrefix string) string {
+	if len(text) <= maxWidth {
+		return text
+	}
+
+	var result strings.Builder
+	words := strings.Fields(text)
+	lineLen := 0
+
+	for i, word := range words {
+		wordLen := len(word)
+
+		if i == 0 {
+			// First word always goes on first line
+			result.WriteString(word)
+			lineLen = wordLen
+		} else if lineLen+1+wordLen > maxWidth {
+			// Start new line
+			result.WriteString("\n" + contPrefix + word)
+			lineLen = len(contPrefix) + wordLen
+		} else {
+			// Add to current line with space
+			result.WriteString(" " + word)
+			lineLen += 1 + wordLen
+		}
+	}
+
+	return result.String()
 }
