@@ -9,6 +9,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/calibration"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
@@ -177,7 +178,52 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 		return nil, fmt.Errorf("analyzing config: %w", err)
 	}
 
+	// Add database tuning recommendations
+	o.addDatabaseTuningRecommendations(ctx, suggestions)
+
 	return suggestions, nil
+}
+
+// addDatabaseTuningRecommendations adds source and target database tuning recommendations.
+func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, suggestions *driver.SmartConfigSuggestions) {
+	// Get AI mapper (required for database tuning - no fallback)
+	aiMapper, err := driver.NewAITypeMapperFromSecrets()
+	if err != nil {
+		// AI not configured - that's fine, just skip tuning analysis
+		aiMapper = nil
+	}
+
+	// Schema statistics for recommendations
+	stats := dbtuning.SchemaStatistics{
+		TotalTables:     suggestions.TotalTables,
+		TotalRows:       suggestions.TotalRows,
+		AvgRowSizeBytes: suggestions.AvgRowSizeBytes,
+		EstimatedMemMB:  suggestions.EstimatedMemMB,
+	}
+
+	// Analyze source database tuning using AI-driven approach
+	if o.sourcePool != nil && o.sourcePool.DB() != nil {
+		logging.Info("Analyzing source database configuration...")
+		sourceTuning, err := dbtuning.Analyze(
+			ctx,
+			o.sourcePool.DB(),
+			o.sourcePool.DBType(),
+			"source",
+			stats,
+			aiMapper,
+		)
+		if err != nil {
+			logging.Warn("Failed to analyze source database tuning: %v", err)
+		} else {
+			suggestions.SourceTuning = sourceTuning
+			if sourceTuning.TuningPotential != "unknown" {
+				logging.Info("Source tuning: %s potential (%s)", sourceTuning.TuningPotential, sourceTuning.EstimatedImpact)
+			}
+		}
+	}
+
+	// Note: Target tuning is skipped when SourceOnly option is used (e.g., in analyze command).
+	// Target tuning will be available when full orchestrator is created during migration.
 }
 
 // Calibrate runs calibration tests to find optimal migration configuration.

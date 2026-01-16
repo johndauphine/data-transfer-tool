@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/shirou/gopsutil/v3/mem"
 )
@@ -41,6 +42,10 @@ type SmartConfigSuggestions struct {
 
 	// AISuggestions contains AI-recommended values (if AI was used)
 	AISuggestions *AutoTuneOutput
+
+	// Database tuning recommendations (NEW)
+	SourceTuning *dbtuning.DatabaseTuning
+	TargetTuning *dbtuning.DatabaseTuning
 }
 
 // AutoTuneInput contains system and database info for AI auto-tuning.
@@ -679,11 +684,104 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 		sb.WriteString("\n")
 	}
 
+	// Database tuning recommendations
+	if s.SourceTuning != nil {
+		sb.WriteString(s.formatDatabaseTuning(s.SourceTuning))
+	}
+
+	if s.TargetTuning != nil {
+		sb.WriteString(s.formatDatabaseTuning(s.TargetTuning))
+	}
+
 	// Warnings
 	if len(s.Warnings) > 0 {
 		sb.WriteString("# Warnings:\n")
 		for _, w := range s.Warnings {
 			sb.WriteString(fmt.Sprintf("# - %s\n", w))
+		}
+	}
+
+	return sb.String()
+}
+
+// formatDatabaseTuning formats database tuning recommendations as YAML comments.
+func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseTuning) string {
+	var sb strings.Builder
+
+	roleTitle := strings.Title(tuning.Role)
+	sb.WriteString(fmt.Sprintf("# %s Database Tuning Recommendations (%s)\n", roleTitle, strings.ToUpper(tuning.DatabaseType)))
+	sb.WriteString(fmt.Sprintf("# Tuning Potential: %s\n", strings.ToUpper(tuning.TuningPotential)))
+	sb.WriteString(fmt.Sprintf("# Estimated Impact: %s\n\n", tuning.EstimatedImpact))
+
+	if len(tuning.Recommendations) == 0 {
+		sb.WriteString(fmt.Sprintf("# No %s database tuning recommendations. Database is already well-tuned.\n\n", tuning.Role))
+		return sb.String()
+	}
+
+	// Group by priority
+	priority1 := []dbtuning.TuningRecommendation{}
+	priority2 := []dbtuning.TuningRecommendation{}
+	priority3 := []dbtuning.TuningRecommendation{}
+
+	for _, rec := range tuning.Recommendations {
+		switch rec.Priority {
+		case 1:
+			priority1 = append(priority1, rec)
+		case 2:
+			priority2 = append(priority2, rec)
+		case 3:
+			priority3 = append(priority3, rec)
+		}
+	}
+
+	// Format recommendations by priority
+	if len(priority1) > 0 {
+		sb.WriteString(fmt.Sprintf("# %s_tuning_critical:\n", tuning.Role))
+		for _, rec := range priority1 {
+			sb.WriteString(s.formatRecommendation(rec))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(priority2) > 0 {
+		sb.WriteString(fmt.Sprintf("# %s_tuning_important:\n", tuning.Role))
+		for _, rec := range priority2 {
+			sb.WriteString(s.formatRecommendation(rec))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(priority3) > 0 {
+		sb.WriteString(fmt.Sprintf("# %s_tuning_optional:\n", tuning.Role))
+		for _, rec := range priority3 {
+			sb.WriteString(s.formatRecommendation(rec))
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+// formatRecommendation formats a single tuning recommendation.
+func (s *SmartConfigSuggestions) formatRecommendation(rec dbtuning.TuningRecommendation) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("#   - parameter: %s\n", rec.Parameter))
+	sb.WriteString(fmt.Sprintf("#     current: %v\n", rec.CurrentValue))
+	sb.WriteString(fmt.Sprintf("#     recommended: %v\n", rec.RecommendedValue))
+	sb.WriteString(fmt.Sprintf("#     impact: %s\n", rec.Impact))
+	sb.WriteString(fmt.Sprintf("#     reason: %s\n", rec.Reason))
+
+	if rec.CanApplyRuntime && rec.SQLCommand != "" {
+		sb.WriteString("#     apply: " + rec.SQLCommand + "\n")
+	} else if rec.RequiresRestart && rec.ConfigFile != "" {
+		// Indent config file lines
+		lines := strings.Split(rec.ConfigFile, "\n")
+		sb.WriteString("#     config:\n")
+		for _, line := range lines {
+			if line != "" {
+				sb.WriteString("#       " + line + "\n")
+			}
 		}
 	}
 
