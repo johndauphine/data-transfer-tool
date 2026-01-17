@@ -46,15 +46,16 @@ func sanitizePGIdentifier(ident string) string {
 
 // Writer implements driver.Writer for PostgreSQL.
 type Writer struct {
-	pool        *pgxpool.Pool
-	config      *dbconfig.TargetConfig
-	maxConns    int
-	sourceType  string
-	dialect     *Dialect
-	typeMapper  driver.TypeMapper
-	tableMapper driver.TableTypeMapper  // Table-level DDL generation
-	dbContext   *driver.DatabaseContext // Cached database context for AI
-	cachedDB    *sql.DB                 // Cached database/sql wrapper for tuning analysis
+	pool               *pgxpool.Pool
+	config             *dbconfig.TargetConfig
+	maxConns           int
+	sourceType         string
+	dialect            *Dialect
+	typeMapper         driver.TypeMapper
+	tableMapper        driver.TableTypeMapper         // Table-level DDL generation
+	finalizationMapper driver.FinalizationDDLMapper   // AI-driven finalization DDL
+	dbContext          *driver.DatabaseContext        // Cached database context for AI
+	cachedDB           *sql.DB                        // Cached database/sql wrapper for tuning analysis
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -104,14 +105,18 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		}
 	}
 
+	// Check if type mapper also implements finalization DDL mapper
+	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
+
 	w := &Writer{
-		pool:        pool,
-		config:      cfg,
-		maxConns:    maxConns,
-		sourceType:  opts.SourceType,
-		dialect:     dialect,
-		typeMapper:  opts.TypeMapper,
-		tableMapper: tableMapper,
+		pool:               pool,
+		config:             cfg,
+		maxConns:           maxConns,
+		sourceType:         opts.SourceType,
+		dialect:            dialect,
+		typeMapper:         opts.TypeMapper,
+		tableMapper:        tableMapper,
+		finalizationMapper: finalizationMapper,
 	}
 
 	// Gather database context for AI
@@ -349,87 +354,72 @@ func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSc
 	return err
 }
 
-// CreateIndex creates an index.
+// CreateIndex creates an index using AI-generated DDL.
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
-	sanitizedTable := sanitizePGIdentifier(t.Name)
-	sanitizedIdxName := sanitizePGIdentifier(idx.Name)
-
-	var sb strings.Builder
-	sb.WriteString("CREATE ")
-	if idx.IsUnique {
-		sb.WriteString("UNIQUE ")
-	}
-	sb.WriteString("INDEX ")
-	sb.WriteString(w.dialect.QuoteIdentifier(sanitizedIdxName))
-	sb.WriteString(" ON ")
-	sb.WriteString(w.dialect.QualifyTable(targetSchema, sanitizedTable))
-	sb.WriteString(" (")
-
-	cols := make([]string, len(idx.Columns))
-	for i, c := range idx.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
-	}
-	sb.WriteString(strings.Join(cols, ", "))
-	sb.WriteString(")")
-
-	if len(idx.IncludeCols) > 0 {
-		sb.WriteString(" INCLUDE (")
-		inc := make([]string, len(idx.IncludeCols))
-		for i, c := range idx.IncludeCols {
-			inc[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
-		}
-		sb.WriteString(strings.Join(inc, ", "))
-		sb.WriteString(")")
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for index creation")
 	}
 
-	_, err := w.pool.Exec(ctx, sb.String())
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeIndex,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "postgres",
+		Table:         t,
+		Index:         idx,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI index DDL generation failed for %s.%s: %w", t.Name, idx.Name, err)
+	}
+
+	_, err = w.pool.Exec(ctx, ddl)
 	return err
 }
 
-// CreateForeignKey creates a foreign key constraint.
+// CreateForeignKey creates a foreign key constraint using AI-generated DDL.
 func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
-	sanitizedTable := sanitizePGIdentifier(t.Name)
-	sanitizedFKName := sanitizePGIdentifier(fk.Name)
-	sanitizedRefTable := sanitizePGIdentifier(fk.RefTable)
-
-	cols := make([]string, len(fk.Columns))
-	refCols := make([]string, len(fk.RefColumns))
-	for i, c := range fk.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
-	}
-	for i, c := range fk.RefColumns {
-		refCols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for foreign key creation")
 	}
 
-	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
-		w.dialect.QualifyTable(targetSchema, sanitizedTable),
-		w.dialect.QuoteIdentifier(sanitizedFKName),
-		strings.Join(cols, ", "),
-		w.dialect.QualifyTable(fk.RefSchema, sanitizedRefTable),
-		strings.Join(refCols, ", "))
-
-	if fk.OnDelete != "" && fk.OnDelete != "NO_ACTION" {
-		sql += " ON DELETE " + strings.ReplaceAll(fk.OnDelete, "_", " ")
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeForeignKey,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "postgres",
+		Table:         t,
+		ForeignKey:    fk,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI FK DDL generation failed for %s.%s: %w", t.Name, fk.Name, err)
 	}
-	if fk.OnUpdate != "" && fk.OnUpdate != "NO_ACTION" {
-		sql += " ON UPDATE " + strings.ReplaceAll(fk.OnUpdate, "_", " ")
-	}
 
-	_, err := w.pool.Exec(ctx, sql)
+	_, err = w.pool.Exec(ctx, ddl)
 	return err
 }
 
-// CreateCheckConstraint creates a check constraint.
+// CreateCheckConstraint creates a check constraint using AI-generated DDL.
 func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
-	sanitizedTable := sanitizePGIdentifier(t.Name)
-	sanitizedChkName := sanitizePGIdentifier(chk.Name)
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for check constraint creation")
+	}
 
-	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK %s",
-		w.dialect.QualifyTable(targetSchema, sanitizedTable),
-		w.dialect.QuoteIdentifier(sanitizedChkName),
-		chk.Definition)
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:            driver.DDLTypeCheckConstraint,
+		SourceDBType:    w.sourceType,
+		TargetDBType:    "postgres",
+		Table:           t,
+		CheckConstraint: chk,
+		TargetSchema:    targetSchema,
+		TargetContext:   w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI check constraint DDL generation failed for %s.%s: %w", t.Name, chk.Name, err)
+	}
 
-	_, err := w.pool.Exec(ctx, sql)
+	_, err = w.pool.Exec(ctx, ddl)
 	return err
 }
 
