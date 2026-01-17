@@ -46,15 +46,16 @@ func sanitizePGIdentifier(ident string) string {
 
 // Writer implements driver.Writer for PostgreSQL.
 type Writer struct {
-	pool        *pgxpool.Pool
-	config      *dbconfig.TargetConfig
-	maxConns    int
-	sourceType  string
-	dialect     *Dialect
-	typeMapper  driver.TypeMapper
-	tableMapper driver.TableTypeMapper  // Table-level DDL generation
-	dbContext   *driver.DatabaseContext // Cached database context for AI
-	cachedDB    *sql.DB                 // Cached database/sql wrapper for tuning analysis
+	pool               *pgxpool.Pool
+	config             *dbconfig.TargetConfig
+	maxConns           int
+	sourceType         string
+	dialect            *Dialect
+	typeMapper         driver.TypeMapper
+	tableMapper        driver.TableTypeMapper       // Table-level DDL generation
+	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
+	dbContext          *driver.DatabaseContext      // Cached database context for AI
+	cachedDB           *sql.DB                      // Cached database/sql wrapper for tuning analysis
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -104,14 +105,18 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		}
 	}
 
+	// Check if type mapper also implements finalization DDL mapper
+	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
+
 	w := &Writer{
-		pool:        pool,
-		config:      cfg,
-		maxConns:    maxConns,
-		sourceType:  opts.SourceType,
-		dialect:     dialect,
-		typeMapper:  opts.TypeMapper,
-		tableMapper: tableMapper,
+		pool:               pool,
+		config:             cfg,
+		maxConns:           maxConns,
+		sourceType:         opts.SourceType,
+		dialect:            dialect,
+		typeMapper:         opts.TypeMapper,
+		tableMapper:        tableMapper,
+		finalizationMapper: finalizationMapper,
 	}
 
 	// Gather database context for AI
@@ -327,109 +332,225 @@ func (w *Writer) SetTableLogged(ctx context.Context, schema, table string) error
 	return err
 }
 
-// CreatePrimaryKey creates the primary key constraint.
+// CreatePrimaryKey is a no-op because PK is created with the table via AI-generated DDL.
 func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
-	if len(t.PrimaryKey) == 0 {
-		return nil
-	}
-
-	sanitizedTable := sanitizePGIdentifier(t.Name)
-	cols := make([]string, len(t.PrimaryKey))
-	for i, c := range t.PrimaryKey {
-		cols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
-	}
-
-	pkName := fmt.Sprintf("pk_%s", sanitizedTable)
-	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY (%s)",
-		w.dialect.QualifyTable(targetSchema, sanitizedTable),
-		w.dialect.QuoteIdentifier(pkName),
-		strings.Join(cols, ", "))
-
-	_, err := w.pool.Exec(ctx, sql)
-	return err
+	return nil
 }
 
-// CreateIndex creates an index.
-func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
-	sanitizedTable := sanitizePGIdentifier(t.Name)
-	sanitizedIdxName := sanitizePGIdentifier(idx.Name)
+// GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
+// This provides context to AI for generating indexes, FKs, etc.
+func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
+	// Use pg_get_tabledef extension if available, otherwise build from catalog
+	var ddl string
+
+	// First try the extension (if installed)
+	err := w.pool.QueryRow(ctx,
+		`SELECT pg_get_tabledef($1, $2)`,
+		schema, table,
+	).Scan(&ddl)
+	if err == nil && ddl != "" {
+		return ddl
+	}
+
+	// Fallback: build DDL from information_schema
+	rows, err := w.pool.Query(ctx, `
+		SELECT
+			column_name,
+			data_type,
+			character_maximum_length,
+			numeric_precision,
+			numeric_scale,
+			is_nullable,
+			column_default
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2
+		ORDER BY ordinal_position
+	`, schema, table)
+	if err != nil {
+		logging.Debug("Could not get table DDL for %s.%s: %v", schema, table, err)
+		return ""
+	}
+	defer rows.Close()
 
 	var sb strings.Builder
-	sb.WriteString("CREATE ")
-	if idx.IsUnique {
-		sb.WriteString("UNIQUE ")
-	}
-	sb.WriteString("INDEX ")
-	sb.WriteString(w.dialect.QuoteIdentifier(sanitizedIdxName))
-	sb.WriteString(" ON ")
-	sb.WriteString(w.dialect.QualifyTable(targetSchema, sanitizedTable))
-	sb.WriteString(" (")
+	// Use dialect's QuoteIdentifier for proper escaping
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s.%s (\n",
+		w.dialect.QuoteIdentifier(schema),
+		w.dialect.QuoteIdentifier(table)))
 
-	cols := make([]string, len(idx.Columns))
-	for i, c := range idx.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
-	}
-	sb.WriteString(strings.Join(cols, ", "))
-	sb.WriteString(")")
+	first := true
+	for rows.Next() {
+		var colName, dataType, isNullable string
+		var charMaxLen, numPrecision, numScale sql.NullInt64
+		var colDefault sql.NullString
 
-	if len(idx.IncludeCols) > 0 {
-		sb.WriteString(" INCLUDE (")
-		inc := make([]string, len(idx.IncludeCols))
-		for i, c := range idx.IncludeCols {
-			inc[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+		if err := rows.Scan(&colName, &dataType, &charMaxLen, &numPrecision, &numScale, &isNullable, &colDefault); err != nil {
+			logging.Debug("Failed to scan column for %s.%s: %v", schema, table, err)
+			continue
 		}
-		sb.WriteString(strings.Join(inc, ", "))
-		sb.WriteString(")")
+
+		if !first {
+			sb.WriteString(",\n")
+		}
+		first = false
+
+		sb.WriteString(fmt.Sprintf("    %s ", w.dialect.QuoteIdentifier(colName)))
+
+		// Build type with precision
+		typeStr := dataType
+		if charMaxLen.Valid && charMaxLen.Int64 > 0 {
+			typeStr = fmt.Sprintf("%s(%d)", dataType, charMaxLen.Int64)
+		} else if numPrecision.Valid && numPrecision.Int64 > 0 {
+			if numScale.Valid && numScale.Int64 > 0 {
+				typeStr = fmt.Sprintf("%s(%d,%d)", dataType, numPrecision.Int64, numScale.Int64)
+			} else {
+				typeStr = fmt.Sprintf("%s(%d)", dataType, numPrecision.Int64)
+			}
+		}
+		sb.WriteString(typeStr)
+
+		if isNullable == "NO" {
+			sb.WriteString(" NOT NULL")
+		}
+		if colDefault.Valid && colDefault.String != "" {
+			sb.WriteString(fmt.Sprintf(" DEFAULT %s", colDefault.String))
+		}
 	}
 
-	_, err := w.pool.Exec(ctx, sb.String())
+	// Check if any columns were found
+	if first {
+		logging.Debug("No columns found for table %s.%s", schema, table)
+		return ""
+	}
+
+	sb.WriteString("\n);")
+	return sb.String()
+}
+
+// CreateIndex creates an index using AI-generated DDL.
+func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for index creation")
+	}
+
+	// Create copies with sanitized (lowercase) names for PostgreSQL
+	sanitizedTableName := sanitizePGIdentifier(t.Name)
+	sanitizedTable := &driver.Table{Name: sanitizedTableName}
+	sanitizedIdx := &driver.Index{
+		Name:     sanitizePGIdentifier(idx.Name),
+		Columns:  make([]string, len(idx.Columns)),
+		IsUnique: idx.IsUnique,
+		Filter:   idx.Filter,
+	}
+	for i, col := range idx.Columns {
+		sanitizedIdx.Columns[i] = sanitizePGIdentifier(col)
+	}
+	if len(idx.IncludeCols) > 0 {
+		sanitizedIdx.IncludeCols = make([]string, len(idx.IncludeCols))
+		for i, col := range idx.IncludeCols {
+			sanitizedIdx.IncludeCols[i] = sanitizePGIdentifier(col)
+		}
+	}
+
+	// Get target table DDL for AI context
+	targetTableDDL := w.GetTableDDL(ctx, targetSchema, sanitizedTableName)
+
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:           driver.DDLTypeIndex,
+		SourceDBType:   w.sourceType,
+		TargetDBType:   "postgres",
+		Table:          sanitizedTable,
+		Index:          sanitizedIdx,
+		TargetSchema:   targetSchema,
+		TargetContext:  w.dbContext,
+		TargetTableDDL: targetTableDDL,
+	})
+	if err != nil {
+		return fmt.Errorf("AI index DDL generation failed for %s.%s: %w", t.Name, idx.Name, err)
+	}
+
+	_, err = w.pool.Exec(ctx, ddl)
 	return err
 }
 
-// CreateForeignKey creates a foreign key constraint.
+// CreateForeignKey creates a foreign key constraint using AI-generated DDL.
 func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
-	sanitizedTable := sanitizePGIdentifier(t.Name)
-	sanitizedFKName := sanitizePGIdentifier(fk.Name)
-	sanitizedRefTable := sanitizePGIdentifier(fk.RefTable)
-
-	cols := make([]string, len(fk.Columns))
-	refCols := make([]string, len(fk.RefColumns))
-	for i, c := range fk.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
-	}
-	for i, c := range fk.RefColumns {
-		refCols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for foreign key creation")
 	}
 
-	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
-		w.dialect.QualifyTable(targetSchema, sanitizedTable),
-		w.dialect.QuoteIdentifier(sanitizedFKName),
-		strings.Join(cols, ", "),
-		w.dialect.QualifyTable(fk.RefSchema, sanitizedRefTable),
-		strings.Join(refCols, ", "))
-
-	if fk.OnDelete != "" && fk.OnDelete != "NO_ACTION" {
-		sql += " ON DELETE " + strings.ReplaceAll(fk.OnDelete, "_", " ")
+	// Create copies with sanitized (lowercase) names for PostgreSQL
+	sanitizedTableName := sanitizePGIdentifier(t.Name)
+	sanitizedTable := &driver.Table{Name: sanitizedTableName}
+	sanitizedFK := &driver.ForeignKey{
+		Name:       sanitizePGIdentifier(fk.Name),
+		Columns:    make([]string, len(fk.Columns)),
+		RefSchema:  fk.RefSchema,
+		RefTable:   sanitizePGIdentifier(fk.RefTable),
+		RefColumns: make([]string, len(fk.RefColumns)),
+		OnDelete:   fk.OnDelete,
+		OnUpdate:   fk.OnUpdate,
 	}
-	if fk.OnUpdate != "" && fk.OnUpdate != "NO_ACTION" {
-		sql += " ON UPDATE " + strings.ReplaceAll(fk.OnUpdate, "_", " ")
+	for i, col := range fk.Columns {
+		sanitizedFK.Columns[i] = sanitizePGIdentifier(col)
+	}
+	for i, col := range fk.RefColumns {
+		sanitizedFK.RefColumns[i] = sanitizePGIdentifier(col)
 	}
 
-	_, err := w.pool.Exec(ctx, sql)
+	// Get target table DDL for AI context
+	targetTableDDL := w.GetTableDDL(ctx, targetSchema, sanitizedTableName)
+
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:           driver.DDLTypeForeignKey,
+		SourceDBType:   w.sourceType,
+		TargetDBType:   "postgres",
+		Table:          sanitizedTable,
+		ForeignKey:     sanitizedFK,
+		TargetSchema:   targetSchema,
+		TargetContext:  w.dbContext,
+		TargetTableDDL: targetTableDDL,
+	})
+	if err != nil {
+		return fmt.Errorf("AI FK DDL generation failed for %s.%s: %w", t.Name, fk.Name, err)
+	}
+
+	_, err = w.pool.Exec(ctx, ddl)
 	return err
 }
 
-// CreateCheckConstraint creates a check constraint.
+// CreateCheckConstraint creates a check constraint using AI-generated DDL.
 func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
-	sanitizedTable := sanitizePGIdentifier(t.Name)
-	sanitizedChkName := sanitizePGIdentifier(chk.Name)
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for check constraint creation")
+	}
 
-	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK %s",
-		w.dialect.QualifyTable(targetSchema, sanitizedTable),
-		w.dialect.QuoteIdentifier(sanitizedChkName),
-		chk.Definition)
+	// Create copies with sanitized (lowercase) names for PostgreSQL
+	sanitizedTableName := sanitizePGIdentifier(t.Name)
+	sanitizedTable := &driver.Table{Name: sanitizedTableName}
+	sanitizedChk := &driver.CheckConstraint{
+		Name:       sanitizePGIdentifier(chk.Name),
+		Definition: chk.Definition,
+	}
 
-	_, err := w.pool.Exec(ctx, sql)
+	// Get target table DDL for AI context
+	targetTableDDL := w.GetTableDDL(ctx, targetSchema, sanitizedTableName)
+
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:            driver.DDLTypeCheckConstraint,
+		SourceDBType:    w.sourceType,
+		TargetDBType:    "postgres",
+		Table:           sanitizedTable,
+		CheckConstraint: sanitizedChk,
+		TargetSchema:    targetSchema,
+		TargetContext:   w.dbContext,
+		TargetTableDDL:  targetTableDDL,
+	})
+	if err != nil {
+		return fmt.Errorf("AI check constraint DDL generation failed for %s.%s: %w", t.Name, chk.Name, err)
+	}
+
+	_, err = w.pool.Exec(ctx, ddl)
 	return err
 }
 

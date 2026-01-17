@@ -2,7 +2,6 @@ package oracle
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"regexp"
@@ -19,16 +18,17 @@ import (
 
 // Writer implements driver.Writer for Oracle Database.
 type Writer struct {
-	db              *sql.DB
-	config          *dbconfig.TargetConfig
-	maxConns        int
-	oracleBatchSize int
-	sourceType      string
-	dialect         *Dialect
-	typeMapper      driver.TypeMapper
-	tableMapper     driver.TableTypeMapper // Table-level DDL generation
-	oracleVersion   string
-	dbContext       *driver.DatabaseContext // Cached database context for AI
+	db                 *sql.DB
+	config             *dbconfig.TargetConfig
+	maxConns           int
+	oracleBatchSize    int
+	sourceType         string
+	dialect            *Dialect
+	typeMapper         driver.TypeMapper
+	tableMapper        driver.TableTypeMapper       // Table-level DDL generation
+	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
+	oracleVersion      string
+	dbContext          *driver.DatabaseContext // Cached database context for AI
 }
 
 // NewWriter creates a new Oracle writer.
@@ -79,16 +79,20 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		}
 	}
 
+	// Check if type mapper also implements finalization DDL mapper
+	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
+
 	w := &Writer{
-		db:              db,
-		config:          cfg,
-		maxConns:        maxConns,
-		oracleBatchSize: opts.OracleBatchSize,
-		sourceType:      opts.SourceType,
-		dialect:         dialect,
-		typeMapper:      opts.TypeMapper,
-		tableMapper:     tableMapper,
-		oracleVersion:   version,
+		db:                 db,
+		config:             cfg,
+		maxConns:           maxConns,
+		oracleBatchSize:    opts.OracleBatchSize,
+		sourceType:         opts.SourceType,
+		dialect:            dialect,
+		typeMapper:         opts.TypeMapper,
+		tableMapper:        tableMapper,
+		finalizationMapper: finalizationMapper,
+		oracleVersion:      version,
 	}
 
 	// Gather database context for AI (best effort - don't fail if metadata unavailable)
@@ -375,6 +379,88 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 	return err == nil, err
 }
 
+// GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
+// Returns empty string if DDL cannot be retrieved.
+func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
+	schemaName := strings.ToUpper(schema)
+	if schemaName == "" {
+		schemaName = strings.ToUpper(w.config.User)
+	}
+	tableName := strings.ToUpper(table)
+
+	// Try DBMS_METADATA first (may require privileges)
+	var ddl string
+	err := w.db.QueryRowContext(ctx, `
+		SELECT DBMS_METADATA.GET_DDL('TABLE', :1, :2) FROM DUAL
+	`, tableName, schemaName).Scan(&ddl)
+	if err == nil && ddl != "" {
+		return ddl
+	}
+
+	// Fall back to building from catalog
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
+		FROM ALL_TAB_COLUMNS
+		WHERE OWNER = :1 AND TABLE_NAME = :2
+		ORDER BY COLUMN_ID
+	`, schemaName, tableName)
+	if err != nil {
+		logging.Debug("Could not get table DDL for %s.%s: %v", schemaName, tableName, err)
+		return ""
+	}
+	defer rows.Close()
+
+	var sb strings.Builder
+	// Use dialect's QuoteIdentifier for proper escaping
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s.%s (\n",
+		w.dialect.QuoteIdentifier(schemaName),
+		w.dialect.QuoteIdentifier(tableName)))
+
+	first := true
+	for rows.Next() {
+		var colName, dataType, nullable string
+		var dataLen, dataPrecision, dataScale sql.NullInt64
+
+		if err := rows.Scan(&colName, &dataType, &dataLen, &dataPrecision, &dataScale, &nullable); err != nil {
+			logging.Debug("Failed to scan column for %s.%s: %v", schemaName, tableName, err)
+			continue
+		}
+
+		if !first {
+			sb.WriteString(",\n")
+		}
+		first = false
+
+		sb.WriteString(fmt.Sprintf("    %s ", w.dialect.QuoteIdentifier(colName)))
+
+		// Build type with precision
+		typeStr := dataType
+		if strings.Contains(dataType, "CHAR") && dataLen.Valid && dataLen.Int64 > 0 {
+			typeStr = fmt.Sprintf("%s(%d)", dataType, dataLen.Int64)
+		} else if dataPrecision.Valid && dataPrecision.Int64 > 0 {
+			if dataScale.Valid && dataScale.Int64 > 0 {
+				typeStr = fmt.Sprintf("%s(%d,%d)", dataType, dataPrecision.Int64, dataScale.Int64)
+			} else {
+				typeStr = fmt.Sprintf("%s(%d)", dataType, dataPrecision.Int64)
+			}
+		}
+		sb.WriteString(typeStr)
+
+		if nullable == "N" {
+			sb.WriteString(" NOT NULL")
+		}
+	}
+
+	// Check if any columns were found
+	if first {
+		logging.Debug("No columns found for table %s.%s", schemaName, tableName)
+		return ""
+	}
+
+	sb.WriteString("\n);")
+	return sb.String()
+}
+
 // GetRowCount returns the row count for a table.
 func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	count, err := w.GetRowCountFast(ctx, schema, table)
@@ -509,119 +595,73 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	return nil
 }
 
-// CreateIndex creates an index on the target table.
+// CreateIndex creates an index on the target table using AI-generated DDL.
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
-	cols := make([]string, len(idx.Columns))
-	for i, col := range idx.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(col)
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for index creation")
 	}
 
-	unique := ""
-	if idx.IsUnique {
-		unique = "UNIQUE "
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeIndex,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "oracle",
+		Table:         t,
+		Index:         idx,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI index DDL generation failed for %s.%s: %w", t.Name, idx.Name, err)
 	}
 
-	idxName := truncateIdentifier(fmt.Sprintf("idx_%s_%s", t.Name, idx.Name), 30)
-
-	sqlStmt := fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
-		unique,
-		w.dialect.QuoteIdentifier(idxName),
-		w.dialect.QualifyTable(targetSchema, t.Name),
-		strings.Join(cols, ", "))
-
-	_, err := w.db.ExecContext(ctx, sqlStmt)
+	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
 
-// CreateForeignKey creates a foreign key constraint.
+// CreateForeignKey creates a foreign key constraint using AI-generated DDL.
 func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
-	cols := make([]string, len(fk.Columns))
-	for i, col := range fk.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(col)
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for foreign key creation")
 	}
 
-	refCols := make([]string, len(fk.RefColumns))
-	for i, col := range fk.RefColumns {
-		refCols[i] = w.dialect.QuoteIdentifier(col)
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeForeignKey,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "oracle",
+		Table:         t,
+		ForeignKey:    fk,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI FK DDL generation failed for %s.%s: %w", t.Name, fk.Name, err)
 	}
 
-	onDelete := mapReferentialAction(fk.OnDelete)
-
-	fkName := truncateIdentifier(fmt.Sprintf("fk_%s_%s", t.Name, fk.Name), 30)
-
-	sqlStmt := fmt.Sprintf(`
-		ALTER TABLE %s
-		ADD CONSTRAINT %s
-		FOREIGN KEY (%s)
-		REFERENCES %s (%s)
-		ON DELETE %s
-	`, w.dialect.QualifyTable(targetSchema, t.Name),
-		w.dialect.QuoteIdentifier(fkName),
-		strings.Join(cols, ", "),
-		w.dialect.QualifyTable(targetSchema, fk.RefTable),
-		strings.Join(refCols, ", "),
-		onDelete)
-
-	_, err := w.db.ExecContext(ctx, sqlStmt)
+	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
 
-func mapReferentialAction(action string) string {
-	switch strings.ToUpper(action) {
-	case "CASCADE":
-		return "CASCADE"
-	case "SET_NULL", "SET NULL":
-		return "SET NULL"
-	default:
-		return "NO ACTION"
-	}
-}
-
-// CreateCheckConstraint creates a check constraint.
+// CreateCheckConstraint creates a check constraint using AI-generated DDL.
 func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
-	definition := convertCheckDefinition(chk.Definition)
-
-	chkName := truncateIdentifier(fmt.Sprintf("chk_%s_%s", t.Name, chk.Name), 30)
-
-	sqlStmt := fmt.Sprintf(`
-		ALTER TABLE %s
-		ADD CONSTRAINT %s
-		CHECK (%s)
-	`, w.dialect.QualifyTable(targetSchema, t.Name),
-		w.dialect.QuoteIdentifier(chkName),
-		definition)
-
-	_, err := w.db.ExecContext(ctx, sqlStmt)
-	return err
-}
-
-func convertCheckDefinition(def string) string {
-	result := def
-
-	// Convert MySQL backtick identifiers to Oracle double quotes
-	for {
-		start := strings.Index(result, "`")
-		if start == -1 {
-			break
-		}
-		end := strings.Index(result[start+1:], "`")
-		if end == -1 {
-			break
-		}
-		colName := result[start+1 : start+1+end]
-		result = result[:start] + `"` + colName + `"` + result[start+end+2:]
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for check constraint creation")
 	}
 
-	// Convert SQL Server brackets to Oracle double quotes
-	result = strings.ReplaceAll(result, "[", `"`)
-	result = strings.ReplaceAll(result, "]", `"`)
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:            driver.DDLTypeCheckConstraint,
+		SourceDBType:    w.sourceType,
+		TargetDBType:    "oracle",
+		Table:           t,
+		CheckConstraint: chk,
+		TargetSchema:    targetSchema,
+		TargetContext:   w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI check constraint DDL generation failed for %s.%s: %w", t.Name, chk.Name, err)
+	}
 
-	// Convert common functions
-	result = strings.ReplaceAll(result, "GETDATE()", "SYSDATE")
-	result = strings.ReplaceAll(result, "NOW()", "SYSDATE")
-	result = strings.ReplaceAll(result, "CURRENT_TIMESTAMP", "SYSTIMESTAMP")
-
-	return result
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
 }
 
 // WriteBatch writes a batch of rows using INSERT ALL.
@@ -875,19 +915,4 @@ func (w *Writer) ExecRaw(ctx context.Context, query string, args ...any) (int64,
 // QueryRowRaw executes a query and scans the result.
 func (w *Writer) QueryRowRaw(ctx context.Context, query string, dest any, args ...any) error {
 	return w.db.QueryRowContext(ctx, query, args...).Scan(dest)
-}
-
-// truncateIdentifier truncates an identifier to maxLen chars, using hash for uniqueness if needed.
-func truncateIdentifier(name string, maxLen int) string {
-	if len(name) <= maxLen {
-		return name
-	}
-
-	// Use hash for uniqueness
-	hash := sha256.Sum256([]byte(name))
-	hashStr := fmt.Sprintf("%x", hash[:6])
-
-	// Keep prefix + hash
-	prefix := name[:maxLen-len(hashStr)-1]
-	return prefix + "_" + hashStr
 }
