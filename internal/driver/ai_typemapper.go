@@ -1777,6 +1777,13 @@ func (m *AITypeMapper) buildIndexDDLPrompt(req FinalizationDDLRequest) string {
 	}
 	sb.WriteString("\n")
 
+	// Target table DDL for context
+	if req.TargetTableDDL != "" {
+		sb.WriteString("=== TARGET TABLE DDL ===\n")
+		sb.WriteString(req.TargetTableDDL)
+		sb.WriteString("\n\n")
+	}
+
 	// Index details
 	sb.WriteString("=== INDEX TO CREATE ===\n")
 	sb.WriteString(fmt.Sprintf("Table: %s\n", req.Table.Name))
@@ -1823,6 +1830,13 @@ func (m *AITypeMapper) buildForeignKeyDDLPrompt(req FinalizationDDLRequest) stri
 		}
 	}
 	sb.WriteString("\n")
+
+	// Target table DDL for context
+	if req.TargetTableDDL != "" {
+		sb.WriteString("=== TARGET TABLE DDL ===\n")
+		sb.WriteString(req.TargetTableDDL)
+		sb.WriteString("\n\n")
+	}
 
 	// Foreign key details
 	sb.WriteString("=== FOREIGN KEY TO CREATE ===\n")
@@ -1881,6 +1895,13 @@ func (m *AITypeMapper) buildCheckConstraintDDLPrompt(req FinalizationDDLRequest)
 		}
 	}
 	sb.WriteString("\n")
+
+	// Target table DDL for context
+	if req.TargetTableDDL != "" {
+		sb.WriteString("=== TARGET TABLE DDL ===\n")
+		sb.WriteString(req.TargetTableDDL)
+		sb.WriteString("\n\n")
+	}
 
 	// Check constraint details
 	sb.WriteString("=== CHECK CONSTRAINT TO CREATE ===\n")

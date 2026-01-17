@@ -259,16 +259,81 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 
 // LoadForeignKeys loads all foreign keys for a table.
 func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
-	// Note: The Table type in driver package doesn't have a ForeignKeys field.
-	// This is handled separately by the orchestrator.
-	return nil
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT
+			fk.name AS fk_name,
+			STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS columns,
+			rs.name AS ref_schema,
+			rt.name AS ref_table,
+			STRING_AGG(rc.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS ref_columns,
+			CASE fk.delete_referential_action
+				WHEN 0 THEN 'NO ACTION'
+				WHEN 1 THEN 'CASCADE'
+				WHEN 2 THEN 'SET NULL'
+				WHEN 3 THEN 'SET DEFAULT'
+			END AS delete_rule,
+			CASE fk.update_referential_action
+				WHEN 0 THEN 'NO ACTION'
+				WHEN 1 THEN 'CASCADE'
+				WHEN 2 THEN 'SET NULL'
+				WHEN 3 THEN 'SET DEFAULT'
+			END AS update_rule
+		FROM sys.foreign_keys fk
+		JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+		JOIN sys.tables pt ON fk.parent_object_id = pt.object_id
+		JOIN sys.schemas ps ON pt.schema_id = ps.schema_id
+		JOIN sys.columns c ON fkc.parent_object_id = c.object_id AND fkc.parent_column_id = c.column_id
+		JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
+		JOIN sys.schemas rs ON rt.schema_id = rs.schema_id
+		JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id
+		WHERE ps.name = @schema AND pt.name = @table
+		GROUP BY fk.name, rs.name, rt.name, fk.delete_referential_action, fk.update_referential_action
+		ORDER BY fk.name
+	`, sql.Named("schema", t.Schema), sql.Named("table", t.Name))
+	if err != nil {
+		return fmt.Errorf("querying foreign keys: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var fk driver.ForeignKey
+		var columns, refColumns string
+		if err := rows.Scan(&fk.Name, &columns, &fk.RefSchema, &fk.RefTable, &refColumns,
+			&fk.OnDelete, &fk.OnUpdate); err != nil {
+			return err
+		}
+		fk.Columns = strings.Split(columns, ",")
+		fk.RefColumns = strings.Split(refColumns, ",")
+		t.ForeignKeys = append(t.ForeignKeys, fk)
+	}
+	return rows.Err()
 }
 
 // LoadCheckConstraints loads all check constraints for a table.
 func (r *Reader) LoadCheckConstraints(ctx context.Context, t *driver.Table) error {
-	// Note: The Table type in driver package doesn't have a CheckConstraints field.
-	// This is handled separately by the orchestrator.
-	return nil
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT
+			cc.name AS constraint_name,
+			cc.definition
+		FROM sys.check_constraints cc
+		JOIN sys.tables t ON cc.parent_object_id = t.object_id
+		JOIN sys.schemas s ON t.schema_id = s.schema_id
+		WHERE s.name = @schema AND t.name = @table
+		ORDER BY cc.name
+	`, sql.Named("schema", t.Schema), sql.Named("table", t.Name))
+	if err != nil {
+		return fmt.Errorf("querying check constraints: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var chk driver.CheckConstraint
+		if err := rows.Scan(&chk.Name, &chk.Definition); err != nil {
+			return err
+		}
+		t.CheckConstraints = append(t.CheckConstraints, chk)
+	}
+	return rows.Err()
 }
 
 // GetRowCount returns the row count for a table.

@@ -27,9 +27,9 @@ type Writer struct {
 	sourceType         string
 	dialect            *Dialect
 	typeMapper         driver.TypeMapper
-	tableMapper        driver.TableTypeMapper         // Table-level DDL generation
-	finalizationMapper driver.FinalizationDDLMapper   // AI-driven finalization DDL
-	dbContext          *driver.DatabaseContext        // Cached database context for AI
+	tableMapper        driver.TableTypeMapper       // Table-level DDL generation
+	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
+	dbContext          *driver.DatabaseContext      // Cached database context for AI
 }
 
 // NewWriter creates a new SQL Server writer.
@@ -358,6 +358,77 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 		) THEN 1 ELSE 0 END
 	`, sql.Named("schema", schema), sql.Named("table", table)).Scan(&exists)
 	return exists == 1, err
+}
+
+// GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
+// Returns empty string if DDL cannot be retrieved.
+func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
+	// Build DDL from information_schema
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT
+			COLUMN_NAME,
+			DATA_TYPE,
+			CHARACTER_MAXIMUM_LENGTH,
+			NUMERIC_PRECISION,
+			NUMERIC_SCALE,
+			IS_NULLABLE,
+			COLUMN_DEFAULT
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table
+		ORDER BY ORDINAL_POSITION
+	`, sql.Named("schema", schema), sql.Named("table", table))
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("CREATE TABLE [%s].[%s] (\n", schema, table))
+
+	first := true
+	for rows.Next() {
+		var colName, dataType, isNullable string
+		var charMaxLen, numPrecision, numScale sql.NullInt64
+		var colDefault sql.NullString
+
+		if err := rows.Scan(&colName, &dataType, &charMaxLen, &numPrecision, &numScale, &isNullable, &colDefault); err != nil {
+			continue
+		}
+
+		if !first {
+			sb.WriteString(",\n")
+		}
+		first = false
+
+		sb.WriteString(fmt.Sprintf("    [%s] ", colName))
+
+		// Build type with precision
+		typeStr := dataType
+		if charMaxLen.Valid && charMaxLen.Int64 > 0 {
+			if charMaxLen.Int64 == -1 {
+				typeStr = fmt.Sprintf("%s(MAX)", dataType)
+			} else {
+				typeStr = fmt.Sprintf("%s(%d)", dataType, charMaxLen.Int64)
+			}
+		} else if numPrecision.Valid && numPrecision.Int64 > 0 {
+			if numScale.Valid && numScale.Int64 > 0 {
+				typeStr = fmt.Sprintf("%s(%d,%d)", dataType, numPrecision.Int64, numScale.Int64)
+			} else {
+				typeStr = fmt.Sprintf("%s(%d)", dataType, numPrecision.Int64)
+			}
+		}
+		sb.WriteString(typeStr)
+
+		if isNullable == "NO" {
+			sb.WriteString(" NOT NULL")
+		}
+		if colDefault.Valid && colDefault.String != "" {
+			sb.WriteString(fmt.Sprintf(" DEFAULT %s", colDefault.String))
+		}
+	}
+
+	sb.WriteString("\n);")
+	return sb.String()
 }
 
 // GetRowCount returns the row count for a table.

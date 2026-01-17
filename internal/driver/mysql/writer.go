@@ -19,17 +19,17 @@ import (
 
 // Writer implements driver.Writer for MySQL/MariaDB.
 type Writer struct {
-	db                  *sql.DB
-	config              *dbconfig.TargetConfig
-	maxConns            int
-	rowsPerBatch        int
-	sourceType          string
-	dialect             *Dialect
-	typeMapper          driver.TypeMapper
-	tableMapper         driver.TableTypeMapper         // Table-level DDL generation
-	finalizationMapper  driver.FinalizationDDLMapper   // AI-driven finalization DDL
-	dbContext           *driver.DatabaseContext        // Cached database context for AI
-	isMariaDB           bool
+	db                 *sql.DB
+	config             *dbconfig.TargetConfig
+	maxConns           int
+	rowsPerBatch       int
+	sourceType         string
+	dialect            *Dialect
+	typeMapper         driver.TypeMapper
+	tableMapper        driver.TableTypeMapper       // Table-level DDL generation
+	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
+	dbContext          *driver.DatabaseContext      // Cached database context for AI
+	isMariaDB          bool
 }
 
 // NewWriter creates a new MySQL/MariaDB writer.
@@ -370,6 +370,24 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
+// Returns empty string if DDL cannot be retrieved.
+func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
+	dbName := schema
+	if dbName == "" {
+		dbName = w.config.Database
+	}
+
+	// MySQL has a convenient SHOW CREATE TABLE command
+	qualifiedTable := fmt.Sprintf("`%s`.`%s`", dbName, table)
+	var tableName, createStmt string
+	err := w.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+qualifiedTable).Scan(&tableName, &createStmt)
+	if err != nil {
+		return ""
+	}
+	return createStmt
 }
 
 // GetRowCount returns the row count for a table.

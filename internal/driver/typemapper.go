@@ -197,6 +197,10 @@ type FinalizationDDLRequest struct {
 
 	// CheckConstraint contains check constraint metadata (when Type is DDLTypeCheckConstraint).
 	CheckConstraint *CheckConstraint
+
+	// TargetTableDDL is the CREATE TABLE DDL for the target table.
+	// This helps AI understand the actual table structure when generating indexes/FKs.
+	TargetTableDDL string
 }
 
 // GetAITypeMapper returns the global AI type mapper loaded from secrets.

@@ -31,6 +31,11 @@ type Writer interface {
 	CreateCheckConstraint(ctx context.Context, t *Table, chk *CheckConstraint, targetSchema string) error
 	HasPrimaryKey(ctx context.Context, schema, table string) (bool, error)
 
+	// DDL introspection
+	// GetTableDDL returns the CREATE TABLE DDL for an existing table.
+	// Returns empty string if DDL cannot be retrieved (non-fatal).
+	GetTableDDL(ctx context.Context, schema, table string) string
+
 	// Data operations
 	GetRowCount(ctx context.Context, schema, table string) (int64, error)      // Tries fast first, falls back to exact
 	GetRowCountFast(ctx context.Context, schema, table string) (int64, error)  // Fast approximate count from system statistics

@@ -25,10 +25,10 @@ type Writer struct {
 	sourceType         string
 	dialect            *Dialect
 	typeMapper         driver.TypeMapper
-	tableMapper        driver.TableTypeMapper         // Table-level DDL generation
-	finalizationMapper driver.FinalizationDDLMapper   // AI-driven finalization DDL
+	tableMapper        driver.TableTypeMapper       // Table-level DDL generation
+	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
 	oracleVersion      string
-	dbContext          *driver.DatabaseContext        // Cached database context for AI
+	dbContext          *driver.DatabaseContext // Cached database context for AI
 }
 
 // NewWriter creates a new Oracle writer.
@@ -377,6 +377,77 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
+// Returns empty string if DDL cannot be retrieved.
+func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
+	schemaName := strings.ToUpper(schema)
+	if schemaName == "" {
+		schemaName = strings.ToUpper(w.config.User)
+	}
+	tableName := strings.ToUpper(table)
+
+	// Try DBMS_METADATA first (may require privileges)
+	var ddl string
+	err := w.db.QueryRowContext(ctx, `
+		SELECT DBMS_METADATA.GET_DDL('TABLE', :1, :2) FROM DUAL
+	`, tableName, schemaName).Scan(&ddl)
+	if err == nil && ddl != "" {
+		return ddl
+	}
+
+	// Fall back to building from catalog
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
+		FROM ALL_TAB_COLUMNS
+		WHERE OWNER = :1 AND TABLE_NAME = :2
+		ORDER BY COLUMN_ID
+	`, schemaName, tableName)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("CREATE TABLE \"%s\".\"%s\" (\n", schemaName, tableName))
+
+	first := true
+	for rows.Next() {
+		var colName, dataType, nullable string
+		var dataLen, dataPrecision, dataScale sql.NullInt64
+
+		if err := rows.Scan(&colName, &dataType, &dataLen, &dataPrecision, &dataScale, &nullable); err != nil {
+			continue
+		}
+
+		if !first {
+			sb.WriteString(",\n")
+		}
+		first = false
+
+		sb.WriteString(fmt.Sprintf("    \"%s\" ", colName))
+
+		// Build type with precision
+		typeStr := dataType
+		if strings.Contains(dataType, "CHAR") && dataLen.Valid && dataLen.Int64 > 0 {
+			typeStr = fmt.Sprintf("%s(%d)", dataType, dataLen.Int64)
+		} else if dataPrecision.Valid && dataPrecision.Int64 > 0 {
+			if dataScale.Valid && dataScale.Int64 > 0 {
+				typeStr = fmt.Sprintf("%s(%d,%d)", dataType, dataPrecision.Int64, dataScale.Int64)
+			} else {
+				typeStr = fmt.Sprintf("%s(%d)", dataType, dataPrecision.Int64)
+			}
+		}
+		sb.WriteString(typeStr)
+
+		if nullable == "N" {
+			sb.WriteString(" NOT NULL")
+		}
+	}
+
+	sb.WriteString("\n);")
+	return sb.String()
 }
 
 // GetRowCount returns the row count for a table.
@@ -834,4 +905,3 @@ func (w *Writer) ExecRaw(ctx context.Context, query string, args ...any) (int64,
 func (w *Writer) QueryRowRaw(ctx context.Context, query string, dest any, args ...any) error {
 	return w.db.QueryRowContext(ctx, query, args...).Scan(dest)
 }
-
