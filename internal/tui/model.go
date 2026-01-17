@@ -84,7 +84,7 @@ type Model struct {
 	cwd     string
 
 	// Single content buffer with memory management
-	content      strings.Builder
+	content      *strings.Builder
 	lineBuffer   string
 	progressLine string
 
@@ -191,6 +191,7 @@ func InitialModel() Model {
 		textInput:  ti,
 		gitInfo:    GetGitInfo(),
 		cwd:        cwd,
+		content:    &strings.Builder{},
 		history:    []string{},
 		historyIdx: -1,
 		mode:       ModeNormal,
@@ -232,7 +233,7 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 	// Recover from panics in Update
 	defer func() {
 		if r := recover(); r != nil {
-			m.appendOutput(fmt.Sprintf("\n[ERROR] Panic in Update: %v\n", r))
+			m.appendOutput(fmt.Sprintf("\n[ERROR] %v\n", r))
 			model = m
 			cmd = nil
 		}
@@ -2087,14 +2088,7 @@ func splitIntoWords(s string) []string {
 }
 
 // Start launches the TUI program
-func Start() (err error) {
-	// Recover from any panics
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic: %v", r)
-		}
-	}()
-
+func Start() error {
 	logging.SetLevel(logging.LevelDebug)
 
 	m := InitialModel()
