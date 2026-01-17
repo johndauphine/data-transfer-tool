@@ -65,6 +65,12 @@ type TableOptions struct {
 	// SourceContext contains metadata about the source database.
 	// This is passed to AI type mapper for better DDL generation.
 	SourceContext *DatabaseContext
+
+	// IncludeIndexes indicates whether to include indexes in DDL generation.
+	IncludeIndexes bool
+
+	// IncludeCheckConstraints indicates whether to include CHECK constraints in DDL generation.
+	IncludeCheckConstraints bool
 }
 
 // WriteBatchOptions configures a bulk write operation.
