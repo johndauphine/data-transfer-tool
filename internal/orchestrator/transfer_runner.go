@@ -390,14 +390,8 @@ func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err 
 		return
 	}
 
-	// Log the diagnosis
-	logging.Warn("  AI Diagnosis:")
-	logging.Warn("    Cause: %s", diagnosis.Cause)
-	logging.Warn("    Suggestions:")
-	for _, s := range diagnosis.Suggestions {
-		logging.Warn("      - %s", s)
-	}
-	logging.Warn("    Confidence: %s", diagnosis.Confidence)
+	// Emit the diagnosis (TUI will format as box, CLI falls back to logging)
+	driver.EmitDiagnosis(diagnosis)
 }
 
 // collectFailures gathers and deduplicates table failures.
