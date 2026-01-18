@@ -323,6 +323,17 @@ CRITICAL Oracle rules - YOU MUST FOLLOW THESE EXACTLY:
 `
 }
 
+// AIDropTablePromptAugmentation returns Oracle-specific instructions for DROP TABLE DDL.
+func (d *Dialect) AIDropTablePromptAugmentation() string {
+	return `
+Oracle-specific requirements:
+- Use DROP TABLE with CASCADE CONSTRAINTS to drop dependent constraints
+- Add PURGE to bypass the recycle bin
+- Quote identifiers with double quotes in UPPERCASE
+- Format: DROP TABLE "SCHEMA"."TABLE" CASCADE CONSTRAINTS PURGE
+`
+}
+
 // extractColumnAliases extracts column aliases from a SELECT list
 func extractColumnAliases(cols string) string {
 	parts := splitColumnsRespectingParens(cols)
