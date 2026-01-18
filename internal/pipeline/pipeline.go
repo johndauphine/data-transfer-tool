@@ -439,7 +439,7 @@ func (p *Pipeline) executeKeysetPagination(
 	})
 
 	// Setup checkpoint coordinator with dynamic checkpoint frequency (supports mid-migration tuning)
-	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &wp.totalWritten, func() int {
+	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, wp.TotalWrittenPtr(), func() int {
 		return p.GetConfig().CheckpointFrequency
 	})
 	if checkpointCoord != nil {
@@ -463,7 +463,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			wp.cancel()
+			wp.Cancel()
 			break
 		}
 		if result.done {
@@ -755,7 +755,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			wp.cancel()
+			wp.Cancel()
 			break
 		}
 		if result.done {

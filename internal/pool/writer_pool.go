@@ -1,0 +1,306 @@
+// Package pool provides shared infrastructure for database pools and parallel writer management.
+package pool
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/johndauphine/dmt/internal/progress"
+)
+
+// WriteJob represents a batch of rows to write.
+type WriteJob struct {
+	Rows     [][]any
+	ReaderID int
+	Seq      int64
+	LastPK   any
+	RowNum   int64
+}
+
+// WriteAck represents an acknowledgment that a write job completed.
+type WriteAck struct {
+	ReaderID int
+	Seq      int64
+	LastPK   any
+	RowNum   int64
+}
+
+// WriteFunc is the function signature for executing a write operation.
+// It receives the writer ID and the rows to write.
+type WriteFunc func(ctx context.Context, writerID int, rows [][]any) error
+
+// workerState tracks the state of a single worker goroutine.
+type workerState struct {
+	id     int
+	active bool
+	cancel context.CancelFunc
+}
+
+// WriterPool manages a pool of parallel write workers.
+// It provides the common infrastructure for both pipeline and transfer packages.
+type WriterPool struct {
+	// Configuration
+	numWriters int
+	bufferSize int
+	writeFunc  WriteFunc
+	prog       *progress.Tracker
+
+	// Channels
+	jobChan chan WriteJob
+	ackChan chan WriteAck
+
+	// State
+	totalWriteTime int64 // atomic, nanoseconds
+	totalWritten   int64 // atomic, rows written
+	writeErr       atomic.Pointer[error]
+
+	// Synchronization
+	writerWg sync.WaitGroup
+	ackWg    sync.WaitGroup
+	ctx      context.Context
+	cancel   context.CancelFunc
+
+	// Dynamic worker management
+	workersMu sync.RWMutex
+	workers   []*workerState // Track individual worker states for scaling
+	started   bool           // Whether Start() has been called
+}
+
+// WriterPoolConfig holds the configuration for creating a writer pool.
+type WriterPoolConfig struct {
+	NumWriters int
+	BufferSize int
+	WriteFunc  WriteFunc
+	Prog       *progress.Tracker
+	EnableAck  bool // Whether to enable ack channel for checkpointing
+}
+
+// NewWriterPool creates a new writer pool with the given configuration.
+func NewWriterPool(ctx context.Context, cfg WriterPoolConfig) *WriterPool {
+	writerCtx, cancel := context.WithCancel(ctx)
+
+	wp := &WriterPool{
+		numWriters: cfg.NumWriters,
+		bufferSize: cfg.BufferSize,
+		writeFunc:  cfg.WriteFunc,
+		prog:       cfg.Prog,
+		jobChan:    make(chan WriteJob, cfg.BufferSize),
+		ctx:        writerCtx,
+		cancel:     cancel,
+		workers:    make([]*workerState, 0, cfg.NumWriters),
+		started:    false,
+	}
+
+	if cfg.EnableAck {
+		wp.ackChan = make(chan WriteAck, cfg.BufferSize)
+	}
+
+	return wp
+}
+
+// Start begins the writer worker goroutines.
+func (wp *WriterPool) Start() {
+	wp.workersMu.Lock()
+	defer wp.workersMu.Unlock()
+
+	if wp.started {
+		return // Already started
+	}
+
+	for i := 0; i < wp.numWriters; i++ {
+		writerID := i
+		wp.writerWg.Add(1)
+
+		// Create worker state with individual context
+		workerCtx, cancel := context.WithCancel(wp.ctx)
+		ws := &workerState{
+			id:     writerID,
+			active: true,
+			cancel: cancel,
+		}
+		wp.workers = append(wp.workers, ws)
+
+		go wp.workerWithContext(writerID, workerCtx)
+	}
+	wp.started = true
+}
+
+// workerWithContext is the main write worker goroutine with context support.
+func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context) {
+	defer wp.writerWg.Done()
+
+	for job := range wp.jobChan {
+		// Check if worker should exit (for scaling down)
+		select {
+		case <-workerCtx.Done():
+			return
+		default:
+		}
+
+		writeStart := time.Now()
+		err := wp.writeFunc(wp.ctx, writerID, job.Rows)
+
+		if err != nil {
+			wp.writeErr.CompareAndSwap(nil, &err)
+			wp.cancel()
+			return
+		}
+
+		writeDuration := time.Since(writeStart)
+		atomic.AddInt64(&wp.totalWriteTime, int64(writeDuration))
+
+		rowCount := int64(len(job.Rows))
+		atomic.AddInt64(&wp.totalWritten, rowCount)
+		if wp.prog != nil {
+			wp.prog.Add(rowCount)
+		}
+
+		if wp.ackChan != nil {
+			wp.ackChan <- WriteAck{
+				ReaderID: job.ReaderID,
+				Seq:      job.Seq,
+				LastPK:   job.LastPK,
+				RowNum:   job.RowNum,
+			}
+		}
+	}
+}
+
+// Submit sends a write job to the pool. Returns false if context is cancelled.
+func (wp *WriterPool) Submit(job WriteJob) bool {
+	select {
+	case wp.jobChan <- job:
+		return true
+	case <-wp.ctx.Done():
+		return false
+	}
+}
+
+// Wait closes the job channel and waits for all workers to complete.
+func (wp *WriterPool) Wait() {
+	close(wp.jobChan)
+	wp.writerWg.Wait()
+	if wp.ackChan != nil {
+		close(wp.ackChan)
+		wp.ackWg.Wait()
+	}
+}
+
+// Error returns any write error that occurred.
+func (wp *WriterPool) Error() error {
+	if err := wp.writeErr.Load(); err != nil {
+		return *err
+	}
+	return nil
+}
+
+// WriteTime returns the total time spent writing.
+func (wp *WriterPool) WriteTime() time.Duration {
+	return time.Duration(atomic.LoadInt64(&wp.totalWriteTime))
+}
+
+// Written returns the total rows written.
+func (wp *WriterPool) Written() int64 {
+	return atomic.LoadInt64(&wp.totalWritten)
+}
+
+// TotalWrittenPtr returns a pointer to the total written counter for external access.
+func (wp *WriterPool) TotalWrittenPtr() *int64 {
+	return &wp.totalWritten
+}
+
+// Acks returns the ack channel for checkpoint coordination.
+func (wp *WriterPool) Acks() <-chan WriteAck {
+	return wp.ackChan
+}
+
+// StartAckProcessor starts a goroutine to process acks with the given handler.
+func (wp *WriterPool) StartAckProcessor(handler func(WriteAck)) {
+	if wp.ackChan == nil {
+		return
+	}
+	wp.ackWg.Add(1)
+	go func() {
+		defer wp.ackWg.Done()
+		for ack := range wp.ackChan {
+			handler(ack)
+		}
+	}()
+}
+
+// Context returns the writer pool's context.
+func (wp *WriterPool) Context() context.Context {
+	return wp.ctx
+}
+
+// Cancel cancels the writer pool's context.
+func (wp *WriterPool) Cancel() {
+	wp.cancel()
+}
+
+// NumWriters returns the configured number of workers.
+func (wp *WriterPool) NumWriters() int {
+	return wp.numWriters
+}
+
+// ScaleWorkers adjusts the number of active workers at runtime.
+// Can increase or decrease the number of workers.
+// Workers are scaled between chunks, not mid-chunk.
+func (wp *WriterPool) ScaleWorkers(newCount int) error {
+	if newCount < 1 {
+		return fmt.Errorf("worker count must be at least 1, got %d", newCount)
+	}
+
+	if newCount > 128 {
+		return fmt.Errorf("worker count too high: %d (max 128)", newCount)
+	}
+
+	wp.workersMu.Lock()
+	defer wp.workersMu.Unlock()
+
+	currentCount := len(wp.workers)
+
+	if newCount == currentCount {
+		return nil // No change needed
+	}
+
+	if newCount > currentCount {
+		// Add new workers
+		for i := currentCount; i < newCount; i++ {
+			workerCtx, cancel := context.WithCancel(wp.ctx)
+			ws := &workerState{
+				id:     i,
+				active: true,
+				cancel: cancel,
+			}
+			wp.workers = append(wp.workers, ws)
+
+			wp.writerWg.Add(1)
+			go wp.workerWithContext(i, workerCtx)
+		}
+	} else {
+		// Remove workers: mark them as inactive and cancel their contexts
+		// They will exit gracefully when they finish current job
+		for i := newCount; i < currentCount; i++ {
+			if i < len(wp.workers) {
+				wp.workers[i].active = false
+				wp.workers[i].cancel()
+			}
+		}
+		// Trim the workers slice
+		wp.workers = wp.workers[:newCount]
+	}
+
+	wp.numWriters = newCount
+	return nil
+}
+
+// GetWorkerCount returns the current number of active workers.
+func (wp *WriterPool) GetWorkerCount() int {
+	wp.workersMu.RLock()
+	defer wp.workersMu.RUnlock()
+	return len(wp.workers)
+}

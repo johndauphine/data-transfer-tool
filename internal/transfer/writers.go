@@ -2,8 +2,6 @@ package transfer
 
 import (
 	"context"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
@@ -12,14 +10,10 @@ import (
 	"github.com/johndauphine/dmt/internal/target"
 )
 
-// writerPool manages a pool of parallel write workers.
-// It consolidates the common logic from executeKeysetPagination and executeRowNumberPagination.
+// writerPool wraps pool.WriterPool with transfer-specific functionality.
 type writerPool struct {
-	// Configuration
-	numWriters           int
-	bufferSize           int
-	useUpsert            bool
-	upsertMergeChunkSize int
+	*pool.WriterPool
+	tgtPool              pool.TargetPool
 	targetSchema         string
 	targetTable          string
 	targetCols           []string
@@ -27,23 +21,8 @@ type writerPool struct {
 	colSRIDs             []int
 	targetPKCols         []string
 	partitionID          *int
-	tgtPool              pool.TargetPool
-	prog                 *progress.Tracker
-
-	// Channels
-	jobChan chan writeJob
-	ackChan chan writeAck
-
-	// State
-	totalWriteTime int64 // atomic, nanoseconds
-	totalWritten   int64 // atomic, rows written
-	writeErr       atomic.Pointer[error]
-
-	// Synchronization
-	writerWg sync.WaitGroup
-	ackWg    sync.WaitGroup
-	ctx      context.Context
-	cancel   context.CancelFunc
+	useUpsert            bool
+	upsertMergeChunkSize int
 }
 
 // writerPoolConfig holds the configuration for creating a writer pool.
@@ -66,8 +45,6 @@ type writerPoolConfig struct {
 
 // newWriterPool creates a new writer pool with the given configuration.
 func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
-	writerCtx, cancel := context.WithCancel(ctx)
-
 	// Default upsert merge chunk size if not specified
 	upsertMergeChunkSize := cfg.UpsertMergeChunkSize
 	if upsertMergeChunkSize <= 0 {
@@ -75,10 +52,7 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 	}
 
 	wp := &writerPool{
-		numWriters:           cfg.NumWriters,
-		bufferSize:           cfg.BufferSize,
-		useUpsert:            cfg.UseUpsert,
-		upsertMergeChunkSize: upsertMergeChunkSize,
+		tgtPool:              cfg.TgtPool,
 		targetSchema:         cfg.TargetSchema,
 		targetTable:          cfg.TargetTable,
 		targetCols:           cfg.TargetCols,
@@ -86,82 +60,40 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 		colSRIDs:             cfg.ColSRIDs,
 		targetPKCols:         cfg.TargetPKCols,
 		partitionID:          cfg.PartitionID,
-		tgtPool:              cfg.TgtPool,
-		prog:                 cfg.Prog,
-		jobChan:              make(chan writeJob, cfg.BufferSize),
-		ctx:                  writerCtx,
-		cancel:               cancel,
+		useUpsert:            cfg.UseUpsert,
+		upsertMergeChunkSize: upsertMergeChunkSize,
 	}
 
-	if cfg.EnableAck {
-		wp.ackChan = make(chan writeAck, cfg.BufferSize)
-	}
+	// Create the base writer pool with our write function
+	wp.WriterPool = pool.NewWriterPool(ctx, pool.WriterPoolConfig{
+		NumWriters: cfg.NumWriters,
+		BufferSize: cfg.BufferSize,
+		WriteFunc:  wp.executeWrite,
+		Prog:       cfg.Prog,
+		EnableAck:  cfg.EnableAck,
+	})
 
 	return wp
 }
 
-// start begins the writer worker goroutines.
-func (wp *writerPool) start() {
-	for i := 0; i < wp.numWriters; i++ {
-		writerID := i
-		wp.writerWg.Add(1)
-		go wp.worker(writerID)
+// executeWrite handles both regular writes and upserts with chunking.
+func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]any) error {
+	if wp.useUpsert {
+		return wp.executeUpsertWithChunking(ctx, writerID, rows)
 	}
-}
-
-// worker is the main write worker goroutine.
-func (wp *writerPool) worker(writerID int) {
-	defer wp.writerWg.Done()
-
-	for job := range wp.jobChan {
-		select {
-		case <-wp.ctx.Done():
-			return
-		default:
-		}
-
-		writeStart := time.Now()
-		var err error
-		if wp.useUpsert {
-			err = wp.executeUpsertWithChunking(writerID, job.rows)
-		} else {
-			err = writeChunkGeneric(wp.ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, job.rows)
-		}
-
-		if err != nil {
-			wp.writeErr.CompareAndSwap(nil, &err)
-			wp.cancel()
-			return
-		}
-
-		writeDuration := time.Since(writeStart)
-		atomic.AddInt64(&wp.totalWriteTime, int64(writeDuration))
-
-		rowCount := int64(len(job.rows))
-		atomic.AddInt64(&wp.totalWritten, rowCount)
-		wp.prog.Add(rowCount)
-
-		if wp.ackChan != nil {
-			wp.ackChan <- writeAck{
-				readerID: job.readerID,
-				seq:      job.seq,
-				lastPK:   job.lastPK,
-				rowNum:   job.rowNum,
-			}
-		}
-	}
+	return writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, rows)
 }
 
 // executeUpsertWithChunking executes an upsert job, chunking if necessary based on UpsertMergeChunkSize.
 // Chunking reduces memory pressure on the target database when processing large batches.
-func (wp *writerPool) executeUpsertWithChunking(writerID int, rows [][]any) error {
+func (wp *writerPool) executeUpsertWithChunking(ctx context.Context, writerID int, rows [][]any) error {
 	mergeChunkSize := wp.upsertMergeChunkSize
 
 	logging.Debug("executeUpsertWithChunking: rows=%d, mergeChunkSize=%d", len(rows), mergeChunkSize)
 
 	// If batch is small enough, execute directly
 	if len(rows) <= mergeChunkSize {
-		return writeChunkUpsertWithWriter(wp.ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
+		return writeChunkUpsertWithWriter(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
 			wp.targetCols, wp.colTypes, wp.colSRIDs, wp.targetPKCols, rows, writerID, wp.partitionID)
 	}
 
@@ -176,7 +108,7 @@ func (wp *writerPool) executeUpsertWithChunking(writerID int, rows [][]any) erro
 		}
 
 		chunk := rows[i:end]
-		if err := writeChunkUpsertWithWriter(wp.ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
+		if err := writeChunkUpsertWithWriter(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
 			wp.targetCols, wp.colTypes, wp.colSRIDs, wp.targetPKCols, chunk, writerID, wp.partitionID); err != nil {
 			return err
 		}
@@ -187,59 +119,55 @@ func (wp *writerPool) executeUpsertWithChunking(writerID int, rows [][]any) erro
 
 // submit sends a write job to the pool. Returns false if context is cancelled.
 func (wp *writerPool) submit(job writeJob) bool {
-	select {
-	case wp.jobChan <- job:
-		return true
-	case <-wp.ctx.Done():
-		return false
-	}
+	return wp.WriterPool.Submit(pool.WriteJob{
+		Rows:     job.rows,
+		ReaderID: job.readerID,
+		Seq:      job.seq,
+		LastPK:   job.lastPK,
+		RowNum:   job.rowNum,
+	})
 }
 
 // wait closes the job channel and waits for all workers to complete.
 func (wp *writerPool) wait() {
-	close(wp.jobChan)
-	wp.writerWg.Wait()
-	if wp.ackChan != nil {
-		close(wp.ackChan)
-		wp.ackWg.Wait()
-	}
+	wp.WriterPool.Wait()
 }
 
 // error returns any write error that occurred.
 func (wp *writerPool) error() error {
-	if err := wp.writeErr.Load(); err != nil {
-		return *err
-	}
-	return nil
+	return wp.WriterPool.Error()
 }
 
 // writeTime returns the total time spent writing.
 func (wp *writerPool) writeTime() time.Duration {
-	return time.Duration(atomic.LoadInt64(&wp.totalWriteTime))
+	return wp.WriterPool.WriteTime()
 }
 
 // written returns the total rows written.
 func (wp *writerPool) written() int64 {
-	return atomic.LoadInt64(&wp.totalWritten)
+	return wp.WriterPool.Written()
 }
 
 // acks returns the ack channel for checkpoint coordination.
-func (wp *writerPool) acks() <-chan writeAck {
-	return wp.ackChan
+func (wp *writerPool) acks() <-chan pool.WriteAck {
+	return wp.WriterPool.Acks()
 }
 
 // startAckProcessor starts a goroutine to process acks with the given handler.
 func (wp *writerPool) startAckProcessor(handler func(writeAck)) {
-	if wp.ackChan == nil {
-		return
-	}
-	wp.ackWg.Add(1)
-	go func() {
-		defer wp.ackWg.Done()
-		for ack := range wp.ackChan {
-			handler(ack)
-		}
-	}()
+	wp.WriterPool.StartAckProcessor(func(ack pool.WriteAck) {
+		handler(writeAck{
+			readerID: ack.ReaderID,
+			seq:      ack.Seq,
+			lastPK:   ack.LastPK,
+			rowNum:   ack.RowNum,
+		})
+	})
+}
+
+// start begins the writer worker goroutines.
+func (wp *writerPool) start() {
+	wp.WriterPool.Start()
 }
 
 // buildTargetPKCols sanitizes PK columns for the target database.
