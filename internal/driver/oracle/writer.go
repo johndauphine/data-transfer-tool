@@ -2,7 +2,6 @@ package oracle
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"regexp"
@@ -19,16 +18,17 @@ import (
 
 // Writer implements driver.Writer for Oracle Database.
 type Writer struct {
-	db              *sql.DB
-	config          *dbconfig.TargetConfig
-	maxConns        int
-	oracleBatchSize int
-	sourceType      string
-	dialect         *Dialect
-	typeMapper      driver.TypeMapper
-	tableMapper     driver.TableTypeMapper // Table-level DDL generation
-	oracleVersion   string
-	dbContext       *driver.DatabaseContext // Cached database context for AI
+	db                 *sql.DB
+	config             *dbconfig.TargetConfig
+	maxConns           int
+	chunkSize          int
+	sourceType         string
+	dialect            *Dialect
+	typeMapper         driver.TypeMapper
+	tableMapper        driver.TableTypeMapper       // Table-level DDL generation
+	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
+	oracleVersion      string
+	dbContext          *driver.DatabaseContext // Cached database context for AI
 }
 
 // NewWriter creates a new Oracle writer.
@@ -79,16 +79,20 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		}
 	}
 
+	// Check if type mapper also implements finalization DDL mapper
+	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
+
 	w := &Writer{
-		db:              db,
-		config:          cfg,
-		maxConns:        maxConns,
-		oracleBatchSize: opts.OracleBatchSize,
-		sourceType:      opts.SourceType,
-		dialect:         dialect,
-		typeMapper:      opts.TypeMapper,
-		tableMapper:     tableMapper,
-		oracleVersion:   version,
+		db:                 db,
+		config:             cfg,
+		maxConns:           maxConns,
+		chunkSize:          opts.ChunkSize,
+		sourceType:         opts.SourceType,
+		dialect:            dialect,
+		typeMapper:         opts.TypeMapper,
+		tableMapper:        tableMapper,
+		finalizationMapper: finalizationMapper,
+		oracleVersion:      version,
 	}
 
 	// Gather database context for AI (best effort - don't fail if metadata unavailable)
@@ -375,6 +379,88 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 	return err == nil, err
 }
 
+// GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
+// Returns empty string if DDL cannot be retrieved.
+func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
+	schemaName := strings.ToUpper(schema)
+	if schemaName == "" {
+		schemaName = strings.ToUpper(w.config.User)
+	}
+	tableName := strings.ToUpper(table)
+
+	// Try DBMS_METADATA first (may require privileges)
+	var ddl string
+	err := w.db.QueryRowContext(ctx, `
+		SELECT DBMS_METADATA.GET_DDL('TABLE', :1, :2) FROM DUAL
+	`, tableName, schemaName).Scan(&ddl)
+	if err == nil && ddl != "" {
+		return ddl
+	}
+
+	// Fall back to building from catalog
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
+		FROM ALL_TAB_COLUMNS
+		WHERE OWNER = :1 AND TABLE_NAME = :2
+		ORDER BY COLUMN_ID
+	`, schemaName, tableName)
+	if err != nil {
+		logging.Debug("Could not get table DDL for %s.%s: %v", schemaName, tableName, err)
+		return ""
+	}
+	defer rows.Close()
+
+	var sb strings.Builder
+	// Use dialect's QuoteIdentifier for proper escaping
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s.%s (\n",
+		w.dialect.QuoteIdentifier(schemaName),
+		w.dialect.QuoteIdentifier(tableName)))
+
+	first := true
+	for rows.Next() {
+		var colName, dataType, nullable string
+		var dataLen, dataPrecision, dataScale sql.NullInt64
+
+		if err := rows.Scan(&colName, &dataType, &dataLen, &dataPrecision, &dataScale, &nullable); err != nil {
+			logging.Debug("Failed to scan column for %s.%s: %v", schemaName, tableName, err)
+			continue
+		}
+
+		if !first {
+			sb.WriteString(",\n")
+		}
+		first = false
+
+		sb.WriteString(fmt.Sprintf("    %s ", w.dialect.QuoteIdentifier(colName)))
+
+		// Build type with precision
+		typeStr := dataType
+		if strings.Contains(dataType, "CHAR") && dataLen.Valid && dataLen.Int64 > 0 {
+			typeStr = fmt.Sprintf("%s(%d)", dataType, dataLen.Int64)
+		} else if dataPrecision.Valid && dataPrecision.Int64 > 0 {
+			if dataScale.Valid && dataScale.Int64 > 0 {
+				typeStr = fmt.Sprintf("%s(%d,%d)", dataType, dataPrecision.Int64, dataScale.Int64)
+			} else {
+				typeStr = fmt.Sprintf("%s(%d)", dataType, dataPrecision.Int64)
+			}
+		}
+		sb.WriteString(typeStr)
+
+		if nullable == "N" {
+			sb.WriteString(" NOT NULL")
+		}
+	}
+
+	// Check if any columns were found
+	if first {
+		logging.Debug("No columns found for table %s.%s", schemaName, tableName)
+		return ""
+	}
+
+	sb.WriteString("\n);")
+	return sb.String()
+}
+
 // GetRowCount returns the row count for a table.
 func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	count, err := w.GetRowCountFast(ctx, schema, table)
@@ -509,119 +595,73 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	return nil
 }
 
-// CreateIndex creates an index on the target table.
+// CreateIndex creates an index on the target table using AI-generated DDL.
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
-	cols := make([]string, len(idx.Columns))
-	for i, col := range idx.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(col)
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for index creation")
 	}
 
-	unique := ""
-	if idx.IsUnique {
-		unique = "UNIQUE "
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeIndex,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "oracle",
+		Table:         t,
+		Index:         idx,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI index DDL generation failed for %s.%s: %w", t.Name, idx.Name, err)
 	}
 
-	idxName := truncateIdentifier(fmt.Sprintf("idx_%s_%s", t.Name, idx.Name), 30)
-
-	sqlStmt := fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
-		unique,
-		w.dialect.QuoteIdentifier(idxName),
-		w.dialect.QualifyTable(targetSchema, t.Name),
-		strings.Join(cols, ", "))
-
-	_, err := w.db.ExecContext(ctx, sqlStmt)
+	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
 
-// CreateForeignKey creates a foreign key constraint.
+// CreateForeignKey creates a foreign key constraint using AI-generated DDL.
 func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
-	cols := make([]string, len(fk.Columns))
-	for i, col := range fk.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(col)
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for foreign key creation")
 	}
 
-	refCols := make([]string, len(fk.RefColumns))
-	for i, col := range fk.RefColumns {
-		refCols[i] = w.dialect.QuoteIdentifier(col)
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeForeignKey,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "oracle",
+		Table:         t,
+		ForeignKey:    fk,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI FK DDL generation failed for %s.%s: %w", t.Name, fk.Name, err)
 	}
 
-	onDelete := mapReferentialAction(fk.OnDelete)
-
-	fkName := truncateIdentifier(fmt.Sprintf("fk_%s_%s", t.Name, fk.Name), 30)
-
-	sqlStmt := fmt.Sprintf(`
-		ALTER TABLE %s
-		ADD CONSTRAINT %s
-		FOREIGN KEY (%s)
-		REFERENCES %s (%s)
-		ON DELETE %s
-	`, w.dialect.QualifyTable(targetSchema, t.Name),
-		w.dialect.QuoteIdentifier(fkName),
-		strings.Join(cols, ", "),
-		w.dialect.QualifyTable(targetSchema, fk.RefTable),
-		strings.Join(refCols, ", "),
-		onDelete)
-
-	_, err := w.db.ExecContext(ctx, sqlStmt)
+	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
 
-func mapReferentialAction(action string) string {
-	switch strings.ToUpper(action) {
-	case "CASCADE":
-		return "CASCADE"
-	case "SET_NULL", "SET NULL":
-		return "SET NULL"
-	default:
-		return "NO ACTION"
-	}
-}
-
-// CreateCheckConstraint creates a check constraint.
+// CreateCheckConstraint creates a check constraint using AI-generated DDL.
 func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
-	definition := convertCheckDefinition(chk.Definition)
-
-	chkName := truncateIdentifier(fmt.Sprintf("chk_%s_%s", t.Name, chk.Name), 30)
-
-	sqlStmt := fmt.Sprintf(`
-		ALTER TABLE %s
-		ADD CONSTRAINT %s
-		CHECK (%s)
-	`, w.dialect.QualifyTable(targetSchema, t.Name),
-		w.dialect.QuoteIdentifier(chkName),
-		definition)
-
-	_, err := w.db.ExecContext(ctx, sqlStmt)
-	return err
-}
-
-func convertCheckDefinition(def string) string {
-	result := def
-
-	// Convert MySQL backtick identifiers to Oracle double quotes
-	for {
-		start := strings.Index(result, "`")
-		if start == -1 {
-			break
-		}
-		end := strings.Index(result[start+1:], "`")
-		if end == -1 {
-			break
-		}
-		colName := result[start+1 : start+1+end]
-		result = result[:start] + `"` + colName + `"` + result[start+end+2:]
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for check constraint creation")
 	}
 
-	// Convert SQL Server brackets to Oracle double quotes
-	result = strings.ReplaceAll(result, "[", `"`)
-	result = strings.ReplaceAll(result, "]", `"`)
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:            driver.DDLTypeCheckConstraint,
+		SourceDBType:    w.sourceType,
+		TargetDBType:    "oracle",
+		Table:           t,
+		CheckConstraint: chk,
+		TargetSchema:    targetSchema,
+		TargetContext:   w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI check constraint DDL generation failed for %s.%s: %w", t.Name, chk.Name, err)
+	}
 
-	// Convert common functions
-	result = strings.ReplaceAll(result, "GETDATE()", "SYSDATE")
-	result = strings.ReplaceAll(result, "NOW()", "SYSDATE")
-	result = strings.ReplaceAll(result, "CURRENT_TIMESTAMP", "SYSTIMESTAMP")
-
-	return result
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
 }
 
 // WriteBatch writes a batch of rows using INSERT ALL.
@@ -639,7 +679,7 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
 
 	// Process in batches - larger batches perform better with godror.Batch
-	batchSize := w.oracleBatchSize
+	batchSize := w.chunkSize
 	if batchSize <= 0 {
 		batchSize = 5000 // Optimal batch size for Oracle bulk inserts
 	}
@@ -679,7 +719,7 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 	defer stmt.Close()
 
 	// godror.Batch limit from config (default 5000 provides optimal throughput)
-	batchLimit := w.oracleBatchSize
+	batchLimit := w.chunkSize
 	if batchLimit <= 0 {
 		batchLimit = 5000
 	}
@@ -732,7 +772,8 @@ func (w *Writer) insertBatchRowByRow(ctx context.Context, tableName, colList str
 	return tx.Commit()
 }
 
-// UpsertBatch performs upsert using MERGE statement.
+// UpsertBatch performs upsert using MERGE with staging table for performance.
+// Uses bulk insert into staging table followed by a single MERGE statement.
 func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions) error {
 	if len(opts.Rows) == 0 {
 		return nil
@@ -742,61 +783,198 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		return fmt.Errorf("upsert requires primary key columns")
 	}
 
-	// Process in batches
-	batchSize := w.oracleBatchSize
-	if batchSize <= 0 {
-		batchSize = 200 // Smaller for MERGE complexity
+	if len(opts.Columns) == 0 {
+		return fmt.Errorf("upsert requires columns")
 	}
 
-	for start := 0; start < len(opts.Rows); start += batchSize {
-		end := start + batchSize
-		if end > len(opts.Rows) {
-			end = len(opts.Rows)
-		}
-		batch := opts.Rows[start:end]
+	// Use staging table approach for better performance
+	return w.upsertWithStagingTable(ctx, opts)
+}
 
-		if err := w.mergeBatch(ctx, opts.Schema, opts.Table, opts.Columns, opts.PKColumns, batch); err != nil {
-			return err
+// generateStagingTableName creates a unique staging table name.
+// Uses process ID and nanosecond timestamp to minimize collision risk.
+func (w *Writer) generateStagingTableName(schema, table string) string {
+	// Use PID + nanoseconds for uniqueness across concurrent processes
+	uniqueID := fmt.Sprintf("%d%d", time.Now().UnixNano(), time.Now().UnixNano()%1000000)
+
+	// Try to include table name for debuggability
+	stagingName := fmt.Sprintf("DMT_STG_%s_%s", table, uniqueID[len(uniqueID)-8:])
+	if len(stagingName) > 30 {
+		// Oracle 12.1 has 30-char limit; use just the unique ID
+		stagingName = fmt.Sprintf("DMT_STG_%s", uniqueID[len(uniqueID)-12:])
+	}
+
+	// Schema-qualify if schema is provided
+	if schema != "" {
+		return w.dialect.QualifyTable(schema, stagingName)
+	}
+	return w.dialect.QuoteIdentifier(stagingName)
+}
+
+// upsertWithStagingTable creates a staging table, bulk inserts data, then executes
+// a single MERGE from the staging table into the target table. This is much faster
+// than the UNION ALL approach for large batches.
+//
+// When possible, this uses an Oracle GLOBAL TEMPORARY TABLE (GTT) defined as:
+//
+//	CREATE GLOBAL TEMPORARY TABLE ... ON COMMIT DELETE ROWS AS SELECT * FROM <target> WHERE 1=0
+//
+// Important characteristics:
+//   - GTT data lifetime: Rows are automatically cleared on COMMIT due to ON COMMIT DELETE ROWS.
+//   - GTT object lifetime: The GTT structure persists for the session, so we don't DROP it.
+//   - Fallback: If GTT creation fails (non-ORA-00955 error), falls back to regular table.
+//   - ORA-00955 (name exists): Reuses the existing GTT after truncating it.
+func (w *Writer) upsertWithStagingTable(ctx context.Context, opts driver.UpsertBatchOptions) error {
+	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
+	stagingTable := w.generateStagingTableName(opts.Schema, opts.Table)
+
+	// Create GTT with same structure as target (no constraints)
+	createSQL := fmt.Sprintf(
+		"CREATE GLOBAL TEMPORARY TABLE %s ON COMMIT DELETE ROWS AS SELECT * FROM %s WHERE 1=0",
+		stagingTable, fullTableName)
+
+	gttCreated := false
+	if _, err := w.db.ExecContext(ctx, createSQL); err != nil {
+		if strings.Contains(err.Error(), "ORA-00955") {
+			// GTT already exists - truncate and reuse it
+			if _, truncErr := w.db.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s", stagingTable)); truncErr != nil {
+				// Truncate failed, fall back to regular table
+				return w.upsertWithRegularStagingTable(ctx, opts)
+			}
+			// Successfully reusing existing GTT
+		} else {
+			// Other error - fall back to regular table approach
+			return w.upsertWithRegularStagingTable(ctx, opts)
 		}
+	} else {
+		gttCreated = true
+	}
+
+	// GTT data is cleared on commit, but if we created it, clean up the table structure
+	// on exit using background context (original ctx may be canceled)
+	if gttCreated {
+		defer func() {
+			// Use background context for cleanup - original context may be canceled
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := w.db.ExecContext(cleanupCtx, fmt.Sprintf("DROP TABLE %s", stagingTable)); err != nil {
+				logging.Debug("Failed to drop GTT %s: %v", stagingTable, err)
+			}
+		}()
+	}
+
+	// Bulk insert into staging table using godror.Batch
+	if err := w.bulkInsertToStaging(ctx, stagingTable, opts.Columns, opts.Rows); err != nil {
+		return fmt.Errorf("bulk insert to staging: %w", err)
+	}
+
+	// Execute MERGE from staging to target
+	mergeSQL := w.buildMergeFromStaging(fullTableName, stagingTable, opts.Columns, opts.PKColumns)
+	if _, err := w.db.ExecContext(ctx, mergeSQL); err != nil {
+		return fmt.Errorf("merge from staging: %w", err)
 	}
 
 	return nil
 }
 
-func (w *Writer) mergeBatch(ctx context.Context, schema, table string, columns, pkColumns []string, rows [][]any) error {
+// upsertWithRegularStagingTable uses a regular table as staging (fallback when GTT fails).
+// The staging table is dropped after use regardless of success/failure.
+func (w *Writer) upsertWithRegularStagingTable(ctx context.Context, opts driver.UpsertBatchOptions) error {
+	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
+	stagingTable := w.generateStagingTableName(opts.Schema, opts.Table)
+
+	// Create regular staging table
+	createSQL := fmt.Sprintf(
+		"CREATE TABLE %s AS SELECT * FROM %s WHERE 1=0",
+		stagingTable, fullTableName)
+
+	if _, err := w.db.ExecContext(ctx, createSQL); err != nil {
+		return fmt.Errorf("create staging table: %w", err)
+	}
+
+	// Ensure cleanup using background context (original ctx may be canceled)
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := w.db.ExecContext(cleanupCtx, fmt.Sprintf("DROP TABLE %s PURGE", stagingTable)); err != nil {
+			logging.Debug("Failed to drop staging table %s: %v", stagingTable, err)
+		}
+	}()
+
+	// Bulk insert into staging table
+	if err := w.bulkInsertToStaging(ctx, stagingTable, opts.Columns, opts.Rows); err != nil {
+		return fmt.Errorf("bulk insert to staging: %w", err)
+	}
+
+	// Execute MERGE from staging to target
+	mergeSQL := w.buildMergeFromStaging(fullTableName, stagingTable, opts.Columns, opts.PKColumns)
+	if _, err := w.db.ExecContext(ctx, mergeSQL); err != nil {
+		return fmt.Errorf("merge from staging: %w", err)
+	}
+
+	return nil
+}
+
+// bulkInsertToStaging inserts rows into staging table using godror.Batch.
+// The stagingTable parameter should already be properly quoted/qualified.
+func (w *Writer) bulkInsertToStaging(ctx context.Context, stagingTable string, columns []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	fullTableName := w.dialect.QualifyTable(schema, table)
-
-	// Build MERGE statement
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("MERGE INTO %s tgt\n", fullTableName))
-	sb.WriteString("USING (\n")
-
-	// Build inline view with UNION ALL
-	paramIdx := 1
-	args := make([]any, 0, len(rows)*len(columns))
-
-	for i, row := range rows {
-		if i > 0 {
-			sb.WriteString("    UNION ALL\n")
-		}
-
-		sb.WriteString("    SELECT ")
-		placeholders := make([]string, len(columns))
-		for j, col := range columns {
-			placeholders[j] = fmt.Sprintf(":%d AS %s", paramIdx, w.dialect.QuoteIdentifier(col))
-			paramIdx++
-		}
-		sb.WriteString(strings.Join(placeholders, ", "))
-		sb.WriteString(" FROM DUAL\n")
-
-		args = append(args, convertRowValues(row)...)
+	if len(columns) == 0 {
+		return fmt.Errorf("no columns provided for bulk insert")
 	}
 
-	sb.WriteString(") src\n")
+	quotedCols := make([]string, len(columns))
+	for i, col := range columns {
+		quotedCols[i] = w.dialect.QuoteIdentifier(col)
+	}
+	colList := strings.Join(quotedCols, ", ")
+
+	placeholders := make([]string, len(columns))
+	for i := range columns {
+		placeholders[i] = fmt.Sprintf(":%d", i+1)
+	}
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		stagingTable, colList, strings.Join(placeholders, ", "))
+
+	stmt, err := w.db.PrepareContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	batchLimit := w.chunkSize
+	if batchLimit <= 0 {
+		batchLimit = 5000
+	}
+	batch := &godror.Batch{
+		Stmt:  stmt,
+		Limit: batchLimit,
+	}
+
+	for _, row := range rows {
+		args := convertRowValues(row)
+		if err := batch.Add(ctx, args...); err != nil {
+			return fmt.Errorf("batch add: %w", err)
+		}
+	}
+
+	if err := batch.Flush(ctx); err != nil {
+		return fmt.Errorf("batch flush: %w", err)
+	}
+
+	return nil
+}
+
+// buildMergeFromStaging constructs MERGE SQL using staging table as source.
+// Both targetTable and stagingTable should already be properly quoted/qualified.
+func (w *Writer) buildMergeFromStaging(targetTable, stagingTable string, columns, pkColumns []string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("MERGE INTO %s tgt\n", targetTable))
+	sb.WriteString(fmt.Sprintf("USING %s src\n", stagingTable))
 
 	// Build ON clause (match on PK columns)
 	onClauses := make([]string, len(pkColumns))
@@ -838,8 +1016,7 @@ func (w *Writer) mergeBatch(ctx context.Context, schema, table string, columns, 
 	sb.WriteString(fmt.Sprintf("    INSERT (%s)\n", strings.Join(quotedCols, ", ")))
 	sb.WriteString(fmt.Sprintf("    VALUES (%s)", strings.Join(srcCols, ", ")))
 
-	_, err := w.db.ExecContext(ctx, sb.String(), args...)
-	return err
+	return sb.String()
 }
 
 func convertRowValues(row []any) []any {
@@ -875,19 +1052,4 @@ func (w *Writer) ExecRaw(ctx context.Context, query string, args ...any) (int64,
 // QueryRowRaw executes a query and scans the result.
 func (w *Writer) QueryRowRaw(ctx context.Context, query string, dest any, args ...any) error {
 	return w.db.QueryRowContext(ctx, query, args...).Scan(dest)
-}
-
-// truncateIdentifier truncates an identifier to maxLen chars, using hash for uniqueness if needed.
-func truncateIdentifier(name string, maxLen int) string {
-	if len(name) <= maxLen {
-		return name
-	}
-
-	// Use hash for uniqueness
-	hash := sha256.Sum256([]byte(name))
-	hashStr := fmt.Sprintf("%x", hash[:6])
-
-	// Keep prefix + hash
-	prefix := name[:maxLen-len(hashStr)-1]
-	return prefix + "_" + hashStr
 }

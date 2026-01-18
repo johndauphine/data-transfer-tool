@@ -19,16 +19,17 @@ import (
 
 // Writer implements driver.Writer for SQL Server.
 type Writer struct {
-	db           *sql.DB
-	config       *dbconfig.TargetConfig
-	maxConns     int
-	rowsPerBatch int
-	compatLevel  int
-	sourceType   string
-	dialect      *Dialect
-	typeMapper   driver.TypeMapper
-	tableMapper  driver.TableTypeMapper  // Table-level DDL generation
-	dbContext    *driver.DatabaseContext // Cached database context for AI
+	db                 *sql.DB
+	config             *dbconfig.TargetConfig
+	maxConns           int
+	chunkSize          int
+	compatLevel        int
+	sourceType         string
+	dialect            *Dialect
+	typeMapper         driver.TypeMapper
+	tableMapper        driver.TableTypeMapper       // Table-level DDL generation
+	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
+	dbContext          *driver.DatabaseContext      // Cached database context for AI
 }
 
 // NewWriter creates a new SQL Server writer.
@@ -87,16 +88,20 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		}
 	}
 
+	// Check if type mapper also implements finalization DDL mapper
+	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
+
 	w := &Writer{
-		db:           db,
-		config:       cfg,
-		maxConns:     maxConns,
-		rowsPerBatch: opts.RowsPerBatch,
-		compatLevel:  compatLevel,
-		sourceType:   opts.SourceType,
-		dialect:      dialect,
-		typeMapper:   opts.TypeMapper,
-		tableMapper:  tableMapper,
+		db:                 db,
+		config:             cfg,
+		maxConns:           maxConns,
+		chunkSize:          opts.ChunkSize,
+		compatLevel:        compatLevel,
+		sourceType:         opts.SourceType,
+		dialect:            dialect,
+		typeMapper:         opts.TypeMapper,
+		tableMapper:        tableMapper,
+		finalizationMapper: finalizationMapper,
 	}
 
 	// Gather database context for AI
@@ -355,6 +360,88 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 	return exists == 1, err
 }
 
+// GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
+// Returns empty string if DDL cannot be retrieved.
+func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
+	// Build DDL from information_schema
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT
+			COLUMN_NAME,
+			DATA_TYPE,
+			CHARACTER_MAXIMUM_LENGTH,
+			NUMERIC_PRECISION,
+			NUMERIC_SCALE,
+			IS_NULLABLE,
+			COLUMN_DEFAULT
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table
+		ORDER BY ORDINAL_POSITION
+	`, sql.Named("schema", schema), sql.Named("table", table))
+	if err != nil {
+		logging.Debug("Could not get table DDL for %s.%s: %v", schema, table, err)
+		return ""
+	}
+	defer rows.Close()
+
+	var sb strings.Builder
+	// Use dialect's QuoteIdentifier for proper escaping
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s.%s (\n",
+		w.dialect.QuoteIdentifier(schema),
+		w.dialect.QuoteIdentifier(table)))
+
+	first := true
+	for rows.Next() {
+		var colName, dataType, isNullable string
+		var charMaxLen, numPrecision, numScale sql.NullInt64
+		var colDefault sql.NullString
+
+		if err := rows.Scan(&colName, &dataType, &charMaxLen, &numPrecision, &numScale, &isNullable, &colDefault); err != nil {
+			logging.Debug("Failed to scan column for %s.%s: %v", schema, table, err)
+			continue
+		}
+
+		if !first {
+			sb.WriteString(",\n")
+		}
+		first = false
+
+		sb.WriteString(fmt.Sprintf("    %s ", w.dialect.QuoteIdentifier(colName)))
+
+		// Build type with precision
+		typeStr := dataType
+		if charMaxLen.Valid && charMaxLen.Int64 > 0 {
+			if charMaxLen.Int64 == -1 {
+				typeStr = fmt.Sprintf("%s(MAX)", dataType)
+			} else {
+				typeStr = fmt.Sprintf("%s(%d)", dataType, charMaxLen.Int64)
+			}
+		} else if numPrecision.Valid && numPrecision.Int64 > 0 {
+			if numScale.Valid && numScale.Int64 > 0 {
+				typeStr = fmt.Sprintf("%s(%d,%d)", dataType, numPrecision.Int64, numScale.Int64)
+			} else {
+				typeStr = fmt.Sprintf("%s(%d)", dataType, numPrecision.Int64)
+			}
+		}
+		sb.WriteString(typeStr)
+
+		if isNullable == "NO" {
+			sb.WriteString(" NOT NULL")
+		}
+		if colDefault.Valid && colDefault.String != "" {
+			sb.WriteString(fmt.Sprintf(" DEFAULT %s", colDefault.String))
+		}
+	}
+
+	// Check if any columns were found
+	if first {
+		logging.Debug("No columns found for table %s.%s", schema, table)
+		return ""
+	}
+
+	sb.WriteString("\n);")
+	return sb.String()
+}
+
 // GetRowCount returns the row count for a table.
 // It first tries a fast statistics-based count, then falls back to COUNT(*) if needed.
 func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
@@ -423,90 +510,72 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	return err
 }
 
-// CreateIndex creates an index on the target table.
+// CreateIndex creates an index on the target table using AI-generated DDL.
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
-	cols := make([]string, len(idx.Columns))
-	for i, col := range idx.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(col)
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for index creation")
 	}
 
-	unique := ""
-	if idx.IsUnique {
-		unique = "UNIQUE "
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeIndex,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "mssql",
+		Table:         t,
+		Index:         idx,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI index DDL generation failed for %s.%s: %w", t.Name, idx.Name, err)
 	}
 
-	idxName := fmt.Sprintf("idx_%s_%s", t.Name, idx.Name)
-	if len(idxName) > 128 {
-		idxName = idxName[:128]
-	}
-
-	sqlStmt := fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
-		unique, w.dialect.QuoteIdentifier(idxName), w.dialect.QualifyTable(targetSchema, t.Name), strings.Join(cols, ", "))
-
-	if len(idx.IncludeCols) > 0 {
-		incCols := make([]string, len(idx.IncludeCols))
-		for i, col := range idx.IncludeCols {
-			incCols[i] = w.dialect.QuoteIdentifier(col)
-		}
-		sqlStmt += fmt.Sprintf(" INCLUDE (%s)", strings.Join(incCols, ", "))
-	}
-
-	_, err := w.db.ExecContext(ctx, sqlStmt)
+	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
 
-// CreateForeignKey creates a foreign key constraint.
+// CreateForeignKey creates a foreign key constraint using AI-generated DDL.
 func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
-	cols := make([]string, len(fk.Columns))
-	for i, col := range fk.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(col)
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for foreign key creation")
 	}
 
-	refCols := make([]string, len(fk.RefColumns))
-	for i, col := range fk.RefColumns {
-		refCols[i] = w.dialect.QuoteIdentifier(col)
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeForeignKey,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "mssql",
+		Table:         t,
+		ForeignKey:    fk,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI FK DDL generation failed for %s.%s: %w", t.Name, fk.Name, err)
 	}
 
-	onDelete := mapReferentialAction(fk.OnDelete)
-	onUpdate := mapReferentialAction(fk.OnUpdate)
-
-	fkName := fmt.Sprintf("fk_%s_%s", t.Name, fk.Name)
-	if len(fkName) > 128 {
-		fkName = fkName[:128]
-	}
-
-	sqlStmt := fmt.Sprintf(`
-		ALTER TABLE %s
-		ADD CONSTRAINT %s
-		FOREIGN KEY (%s)
-		REFERENCES %s (%s)
-		ON DELETE %s
-		ON UPDATE %s
-	`, w.dialect.QualifyTable(targetSchema, t.Name), w.dialect.QuoteIdentifier(fkName),
-		strings.Join(cols, ", "),
-		w.dialect.QualifyTable(targetSchema, fk.RefTable), strings.Join(refCols, ", "),
-		onDelete, onUpdate)
-
-	_, err := w.db.ExecContext(ctx, sqlStmt)
+	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
 
-// CreateCheckConstraint creates a check constraint.
+// CreateCheckConstraint creates a check constraint using AI-generated DDL.
 func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
-	definition := convertCheckDefinition(chk.Definition)
-
-	chkName := fmt.Sprintf("chk_%s_%s", t.Name, chk.Name)
-	if len(chkName) > 128 {
-		chkName = chkName[:128]
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for check constraint creation")
 	}
 
-	sqlStmt := fmt.Sprintf(`
-		ALTER TABLE %s
-		ADD CONSTRAINT %s
-		CHECK %s
-	`, w.dialect.QualifyTable(targetSchema, t.Name), w.dialect.QuoteIdentifier(chkName), definition)
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:            driver.DDLTypeCheckConstraint,
+		SourceDBType:    w.sourceType,
+		TargetDBType:    "mssql",
+		Table:           t,
+		CheckConstraint: chk,
+		TargetSchema:    targetSchema,
+		TargetContext:   w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI check constraint DDL generation failed for %s.%s: %w", t.Name, chk.Name, err)
+	}
 
-	_, err := w.db.ExecContext(ctx, sqlStmt)
+	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
 
@@ -536,14 +605,14 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 			return fmt.Errorf("expected *mssql.Conn, got %T", driverConn)
 		}
 
-		rowsPerBatch := w.rowsPerBatch
-		if rowsPerBatch <= 0 || rowsPerBatch > len(opts.Rows) {
-			rowsPerBatch = len(opts.Rows)
+		batchSize := w.chunkSize
+		if batchSize <= 0 || batchSize > len(opts.Rows) {
+			batchSize = len(opts.Rows)
 		}
 
 		bulk := mssqlConn.CreateBulkContext(ctx, fullTableName, opts.Columns)
 		bulk.Options.Tablock = true
-		bulk.Options.RowsPerBatch = rowsPerBatch
+		bulk.Options.RowsPerBatch = batchSize
 
 		for _, row := range opts.Rows {
 			err := bulk.AddRow(convertRowForBulkCopy(row))
@@ -794,7 +863,7 @@ func (w *Writer) bulkInsertToTemp(ctx context.Context, conn *sql.Conn, tempTable
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx, mssql.CopyIn(tempTable, mssql.BulkOptions{
-		RowsPerBatch: w.rowsPerBatch,
+		RowsPerBatch: w.chunkSize,
 	}, cols...))
 	if err != nil {
 		return err
@@ -1007,47 +1076,6 @@ func isDeadlockError(err error) bool {
 
 	errStr := err.Error()
 	return strings.Contains(errStr, "deadlock") || strings.Contains(errStr, "1205")
-}
-
-func mapReferentialAction(action string) string {
-	switch strings.ToUpper(action) {
-	case "CASCADE":
-		return "CASCADE"
-	case "SET_NULL", "SET NULL":
-		return "SET NULL"
-	case "SET_DEFAULT", "SET DEFAULT":
-		return "SET DEFAULT"
-	case "RESTRICT", "NO_ACTION", "NO ACTION":
-		return "NO ACTION"
-	default:
-		return "NO ACTION"
-	}
-}
-
-func convertCheckDefinition(def string) string {
-	result := def
-
-	for {
-		start := strings.Index(result, `"`)
-		if start == -1 {
-			break
-		}
-		end := strings.Index(result[start+1:], `"`)
-		if end == -1 {
-			break
-		}
-		colName := result[start+1 : start+1+end]
-		result = result[:start] + "[" + colName + "]" + result[start+end+2:]
-	}
-
-	result = strings.ReplaceAll(result, "CURRENT_TIMESTAMP", "GETDATE()")
-	result = strings.ReplaceAll(result, "current_timestamp", "GETDATE()")
-	result = strings.ReplaceAll(result, " true", " 1")
-	result = strings.ReplaceAll(result, " false", " 0")
-	result = strings.ReplaceAll(result, "(true)", "(1)")
-	result = strings.ReplaceAll(result, "(false)", "(0)")
-
-	return result
 }
 
 // ExecRaw executes a raw SQL query and returns the number of rows affected.

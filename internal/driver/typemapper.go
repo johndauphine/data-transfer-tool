@@ -157,6 +157,55 @@ type TypeInfo struct {
 	SampleValues []string
 }
 
+// FinalizationDDLMapper handles AI-driven DDL generation for finalization phase.
+type FinalizationDDLMapper interface {
+	// GenerateFinalizationDDL generates DDL for indexes, foreign keys, or check constraints.
+	GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error)
+}
+
+// DDLType specifies the type of DDL to generate.
+type DDLType string
+
+const (
+	DDLTypeIndex           DDLType = "index"
+	DDLTypeForeignKey      DDLType = "foreign_key"
+	DDLTypeCheckConstraint DDLType = "check_constraint"
+)
+
+// FinalizationDDLRequest contains information needed to generate finalization DDL.
+type FinalizationDDLRequest struct {
+	// Type specifies what kind of DDL to generate.
+	Type DDLType
+
+	// SourceDBType is the source database type (e.g., "postgres", "mssql").
+	SourceDBType string
+
+	// TargetDBType is the target database type (e.g., "oracle", "mysql").
+	TargetDBType string
+
+	// Table contains the target table metadata.
+	Table *Table
+
+	// TargetSchema is the schema name in the target database.
+	TargetSchema string
+
+	// TargetContext contains metadata about the target database.
+	TargetContext *DatabaseContext
+
+	// Index contains index metadata (when Type is DDLTypeIndex).
+	Index *Index
+
+	// ForeignKey contains FK metadata (when Type is DDLTypeForeignKey).
+	ForeignKey *ForeignKey
+
+	// CheckConstraint contains check constraint metadata (when Type is DDLTypeCheckConstraint).
+	CheckConstraint *CheckConstraint
+
+	// TargetTableDDL is the CREATE TABLE DDL for the target table.
+	// This helps AI understand the actual table structure when generating indexes/FKs.
+	TargetTableDDL string
+}
+
 // GetAITypeMapper returns the global AI type mapper loaded from secrets.
 // This is the only type mapper available - all type mapping is done via AI.
 func GetAITypeMapper() (TypeMapper, error) {

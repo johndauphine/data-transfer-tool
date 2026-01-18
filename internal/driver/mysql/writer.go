@@ -19,16 +19,17 @@ import (
 
 // Writer implements driver.Writer for MySQL/MariaDB.
 type Writer struct {
-	db           *sql.DB
-	config       *dbconfig.TargetConfig
-	maxConns     int
-	rowsPerBatch int
-	sourceType   string
-	dialect      *Dialect
-	typeMapper   driver.TypeMapper
-	tableMapper  driver.TableTypeMapper  // Table-level DDL generation
-	dbContext    *driver.DatabaseContext // Cached database context for AI
-	isMariaDB    bool
+	db                 *sql.DB
+	config             *dbconfig.TargetConfig
+	maxConns           int
+	chunkSize          int
+	sourceType         string
+	dialect            *Dialect
+	typeMapper         driver.TypeMapper
+	tableMapper        driver.TableTypeMapper       // Table-level DDL generation
+	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
+	dbContext          *driver.DatabaseContext      // Cached database context for AI
+	isMariaDB          bool
 }
 
 // NewWriter creates a new MySQL/MariaDB writer.
@@ -88,16 +89,20 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		}
 	}
 
+	// Check if type mapper also implements finalization DDL mapper
+	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
+
 	w := &Writer{
-		db:           db,
-		config:       cfg,
-		maxConns:     maxConns,
-		rowsPerBatch: opts.RowsPerBatch,
-		sourceType:   opts.SourceType,
-		dialect:      dialect,
-		typeMapper:   opts.TypeMapper,
-		tableMapper:  tableMapper,
-		isMariaDB:    isMariaDB,
+		db:                 db,
+		config:             cfg,
+		maxConns:           maxConns,
+		chunkSize:          opts.ChunkSize,
+		sourceType:         opts.SourceType,
+		dialect:            dialect,
+		typeMapper:         opts.TypeMapper,
+		tableMapper:        tableMapper,
+		finalizationMapper: finalizationMapper,
+		isMariaDB:          isMariaDB,
 	}
 
 	// Gather database context for AI
@@ -367,6 +372,25 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 	return err == nil, err
 }
 
+// GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
+// Returns empty string if DDL cannot be retrieved.
+func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
+	dbName := schema
+	if dbName == "" {
+		dbName = w.config.Database
+	}
+
+	// Use dialect's QualifyTable for proper identifier escaping (prevents SQL injection)
+	qualifiedTable := w.dialect.QualifyTable(dbName, table)
+	var tableName, createStmt string
+	err := w.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+qualifiedTable).Scan(&tableName, &createStmt)
+	if err != nil {
+		logging.Debug("Could not get table DDL for %s.%s: %v", dbName, table, err)
+		return ""
+	}
+	return createStmt
+}
+
 // GetRowCount returns the row count for a table.
 func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	// Try fast stats-based count first
@@ -434,90 +458,73 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	return err
 }
 
-// CreateIndex creates an index on the target table.
+// CreateIndex creates an index on the target table using AI-generated DDL.
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
-	cols := make([]string, len(idx.Columns))
-	for i, col := range idx.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(col)
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for index creation")
 	}
 
-	unique := ""
-	if idx.IsUnique {
-		unique = "UNIQUE "
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeIndex,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "mysql",
+		Table:         t,
+		Index:         idx,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI index DDL generation failed for %s.%s: %w", t.Name, idx.Name, err)
 	}
 
-	idxName := fmt.Sprintf("idx_%s_%s", t.Name, idx.Name)
-	if len(idxName) > 64 { // MySQL max identifier length
-		idxName = idxName[:64]
-	}
-
-	sqlStmt := fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
-		unique,
-		w.dialect.QuoteIdentifier(idxName),
-		w.dialect.QualifyTable(targetSchema, t.Name),
-		strings.Join(cols, ", "))
-
-	_, err := w.db.ExecContext(ctx, sqlStmt)
+	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
 
-// CreateForeignKey creates a foreign key constraint.
+// CreateForeignKey creates a foreign key constraint using AI-generated DDL.
 func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
-	cols := make([]string, len(fk.Columns))
-	for i, col := range fk.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(col)
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for foreign key creation")
 	}
 
-	refCols := make([]string, len(fk.RefColumns))
-	for i, col := range fk.RefColumns {
-		refCols[i] = w.dialect.QuoteIdentifier(col)
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeForeignKey,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "mysql",
+		Table:         t,
+		ForeignKey:    fk,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI FK DDL generation failed for %s.%s: %w", t.Name, fk.Name, err)
 	}
 
-	onDelete := mapReferentialAction(fk.OnDelete)
-	onUpdate := mapReferentialAction(fk.OnUpdate)
-
-	fkName := fmt.Sprintf("fk_%s_%s", t.Name, fk.Name)
-	if len(fkName) > 64 {
-		fkName = fkName[:64]
-	}
-
-	sqlStmt := fmt.Sprintf(`
-		ALTER TABLE %s
-		ADD CONSTRAINT %s
-		FOREIGN KEY (%s)
-		REFERENCES %s (%s)
-		ON DELETE %s
-		ON UPDATE %s
-	`, w.dialect.QualifyTable(targetSchema, t.Name),
-		w.dialect.QuoteIdentifier(fkName),
-		strings.Join(cols, ", "),
-		w.dialect.QualifyTable(targetSchema, fk.RefTable),
-		strings.Join(refCols, ", "),
-		onDelete, onUpdate)
-
-	_, err := w.db.ExecContext(ctx, sqlStmt)
+	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
 
-// CreateCheckConstraint creates a check constraint.
+// CreateCheckConstraint creates a check constraint using AI-generated DDL.
 // Note: MySQL 8.0.16+ supports CHECK constraints, earlier versions ignore them.
 func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
-	definition := convertCheckDefinition(chk.Definition)
-
-	chkName := fmt.Sprintf("chk_%s_%s", t.Name, chk.Name)
-	if len(chkName) > 64 {
-		chkName = chkName[:64]
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for check constraint creation")
 	}
 
-	sqlStmt := fmt.Sprintf(`
-		ALTER TABLE %s
-		ADD CONSTRAINT %s
-		CHECK %s
-	`, w.dialect.QualifyTable(targetSchema, t.Name),
-		w.dialect.QuoteIdentifier(chkName),
-		definition)
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:            driver.DDLTypeCheckConstraint,
+		SourceDBType:    w.sourceType,
+		TargetDBType:    "mysql",
+		Table:           t,
+		CheckConstraint: chk,
+		TargetSchema:    targetSchema,
+		TargetContext:   w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("AI check constraint DDL generation failed for %s.%s: %w", t.Name, chk.Name, err)
+	}
 
-	_, err := w.db.ExecContext(ctx, sqlStmt)
+	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
 
@@ -537,7 +544,7 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
 
 	// Process in batches to avoid max_allowed_packet limits
-	batchSize := w.rowsPerBatch
+	batchSize := w.chunkSize
 	if batchSize <= 0 {
 		batchSize = 1000 // Default batch size
 	}
@@ -628,7 +635,7 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 	}
 
 	// Process in batches
-	batchSize := w.rowsPerBatch
+	batchSize := w.chunkSize
 	if batchSize <= 0 {
 		batchSize = 1000
 	}
@@ -715,49 +722,6 @@ func convertRowValues(row []any) []any {
 			result[i] = v
 		}
 	}
-	return result
-}
-
-func mapReferentialAction(action string) string {
-	switch strings.ToUpper(action) {
-	case "CASCADE":
-		return "CASCADE"
-	case "SET_NULL", "SET NULL":
-		return "SET NULL"
-	case "SET_DEFAULT", "SET DEFAULT":
-		return "SET DEFAULT"
-	case "RESTRICT":
-		return "RESTRICT"
-	case "NO_ACTION", "NO ACTION":
-		return "NO ACTION"
-	default:
-		return "NO ACTION"
-	}
-}
-
-func convertCheckDefinition(def string) string {
-	result := def
-
-	// Convert double-quoted identifiers to backticks
-	for {
-		start := strings.Index(result, `"`)
-		if start == -1 {
-			break
-		}
-		end := strings.Index(result[start+1:], `"`)
-		if end == -1 {
-			break
-		}
-		colName := result[start+1 : start+1+end]
-		result = result[:start] + "`" + colName + "`" + result[start+end+2:]
-	}
-
-	// Convert PostgreSQL/MSSQL functions to MySQL equivalents
-	result = strings.ReplaceAll(result, "GETDATE()", "NOW()")
-	result = strings.ReplaceAll(result, "getdate()", "NOW()")
-	result = strings.ReplaceAll(result, "CURRENT_TIMESTAMP", "NOW()")
-	result = strings.ReplaceAll(result, "current_timestamp", "NOW()")
-
 	return result
 }
 
