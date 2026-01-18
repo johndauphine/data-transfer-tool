@@ -623,7 +623,7 @@ func executeKeysetPagination(
 	})
 
 	// Setup checkpoint coordinator
-	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &wp.totalWritten, cfg.Migration.CheckpointFrequency)
+	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, wp.TotalWrittenPtr(), cfg.Migration.CheckpointFrequency)
 	if checkpointCoord != nil {
 		wp.startAckProcessor(checkpointCoord.onAck)
 	}
@@ -643,7 +643,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			wp.cancel()
+			wp.Cancel()
 			break
 		}
 		if result.done {
@@ -948,7 +948,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			wp.cancel()
+			wp.Cancel()
 			break
 		}
 		if result.done {
