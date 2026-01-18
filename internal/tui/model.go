@@ -743,6 +743,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /resume [config_file] Resume an interrupted migration
   /resume --profile NAME Resume using a saved profile
   /validate             Validate migration
+  /config [config_file] Show configuration details
   /analyze [config_file] Analyze source database and suggest configuration
   /calibrate [config]   Run AI calibration to find optimal config
                         Options: --apply (update config), --sample-size N
@@ -866,6 +867,10 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 	case "/calibrate":
 		configFile, profileName, applyToConfig, sampleSize := parseCalibrateArgs(parts)
 		return m.runCalibrateCmd(configFile, profileName, applyToConfig, sampleSize)
+
+	case "/config":
+		configFile, profileName := parseConfigArgs(parts)
+		return m.runConfigCmd(configFile, profileName)
 
 	default:
 		return func() tea.Msg { return OutputMsg("Unknown command: " + cmd + "\n") }
@@ -1106,6 +1111,22 @@ func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
 		}()
 
 		return nil
+	}
+}
+
+func (m Model) runConfigCmd(configFile, profileName string) tea.Cmd {
+	return func() tea.Msg {
+		origin := "config: " + configFile
+		if profileName != "" {
+			origin = "profile: " + profileName
+		}
+
+		cfg, err := loadConfigFromOrigin(configFile, profileName)
+		if err != nil {
+			return OutputMsg(fmt.Sprintf("Error loading %s: %v\n", origin, err))
+		}
+
+		return BoxedOutputMsg(cfg.DebugDump())
 	}
 }
 
