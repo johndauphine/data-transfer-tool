@@ -3,11 +3,14 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
+	"github.com/johndauphine/dmt/internal/config"
+	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -161,13 +164,33 @@ func isIntegerType(dataType string) bool {
 
 // AnalyzeConfig uses AI to analyze the source database and suggest optimal configuration.
 func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*driver.SmartConfigSuggestions, error) {
-	logging.Debug("Analyzing source database for configuration suggestions...")
-
 	// Get AI mapper from secrets
 	aiMapper, err := driver.NewAITypeMapperFromSecrets()
 	if err != nil {
 		return nil, fmt.Errorf("loading AI type mapper: %w", err)
 	}
+
+	// Target-only mode: provide limited analysis (no schema, but still tuning recommendations)
+	if o.sourcePool == nil && o.targetPool != nil {
+		logging.Debug("Analyzing target database only (source unavailable)...")
+
+		suggestions := &driver.SmartConfigSuggestions{}
+
+		// Apply sensible defaults based on system resources
+		o.applySystemDefaults(suggestions)
+
+		// Add target database tuning recommendations
+		o.addDatabaseTuningRecommendations(ctx, suggestions, aiMapper)
+
+		return suggestions, nil
+	}
+
+	// Source is required for full schema analysis
+	if o.sourcePool == nil {
+		return nil, fmt.Errorf("source database connection required for analysis")
+	}
+
+	logging.Debug("Analyzing source database for configuration suggestions...")
 
 	// Create the smart config analyzer
 	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType(), aiMapper)
@@ -192,6 +215,103 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	o.addDatabaseTuningRecommendations(ctx, suggestions, aiMapper)
 
 	return suggestions, nil
+}
+
+// applySystemDefaults applies sensible defaults based on system resources.
+func (o *Orchestrator) applySystemDefaults(suggestions *driver.SmartConfigSuggestions) {
+	cores := runtime.NumCPU()
+
+	// Workers: CPU cores minus 2 for OS, minimum 2
+	workers := cores - 2
+	if workers < 2 {
+		workers = 2
+	}
+
+	suggestions.Workers = workers
+	suggestions.ChunkSizeRecommendation = 50000
+	suggestions.ReadAheadBuffers = 4
+	suggestions.WriteAheadWriters = 2
+	suggestions.ParallelReaders = 2
+	suggestions.MaxPartitions = workers
+	suggestions.LargeTableThreshold = 1000000
+	suggestions.MaxSourceConnections = workers + 4
+	suggestions.MaxTargetConnections = workers*2 + 4
+	suggestions.UpsertMergeChunkSize = 5000
+	suggestions.CheckpointFrequency = 20
+	suggestions.MaxRetries = 3
+}
+
+// GetSystemBasedSuggestions returns tuning suggestions based only on system resources.
+// Use this when no database connections are available. Tries AI first, falls back to defaults.
+func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestions {
+	suggestions := &driver.SmartConfigSuggestions{}
+
+	cores := runtime.NumCPU()
+	memGB := 8 // default assumption
+
+	// Get memory info if available
+	if v, err := mem.VirtualMemory(); err == nil {
+		memGB = int(v.Total / (1024 * 1024 * 1024))
+	}
+
+	// Try AI-based tuning first
+	input := driver.AutoTuneInput{
+		CPUCores:     cores,
+		MemoryGB:     memGB,
+		DatabaseType: cfg.Source.Type,
+		TargetType:   cfg.Target.Type,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if output, err := driver.GetOfflineAutoTune(ctx, input); err == nil && output != nil {
+		suggestions.Workers = output.Workers
+		suggestions.ChunkSizeRecommendation = output.ChunkSize
+		suggestions.ReadAheadBuffers = output.ReadAheadBuffers
+		suggestions.WriteAheadWriters = output.WriteAheadWriters
+		suggestions.ParallelReaders = output.ParallelReaders
+		suggestions.MaxPartitions = output.MaxPartitions
+		suggestions.LargeTableThreshold = int64(output.LargeTableThreshold)
+		suggestions.MaxSourceConnections = output.MaxSourceConnections
+		suggestions.MaxTargetConnections = output.MaxTargetConnections
+		suggestions.UpsertMergeChunkSize = output.UpsertMergeChunkSize
+		suggestions.CheckpointFrequency = output.CheckpointFrequency
+		suggestions.MaxRetries = output.MaxRetries
+		suggestions.EstimatedMemMB = output.EstimatedMemoryMB
+		logging.Info("Using AI-generated recommendations (offline mode)")
+		return suggestions
+	}
+
+	// Fall back to system-based defaults
+	logging.Info("AI unavailable - using system-based defaults")
+
+	workers := cores - 2
+	if workers < 2 {
+		workers = 2
+	}
+
+	suggestions.Workers = workers
+	suggestions.ChunkSizeRecommendation = 50000
+	suggestions.ReadAheadBuffers = 4
+	suggestions.WriteAheadWriters = 2
+	suggestions.ParallelReaders = 2
+	suggestions.MaxPartitions = workers
+	suggestions.LargeTableThreshold = 1000000
+	suggestions.MaxSourceConnections = workers + 4
+	suggestions.MaxTargetConnections = workers*2 + 4
+	suggestions.UpsertMergeChunkSize = 5000
+	suggestions.CheckpointFrequency = 20
+	suggestions.MaxRetries = 3
+	suggestions.EstimatedMemMB = int64(workers) * 4 * int64(suggestions.ChunkSizeRecommendation) * 500 / 1024 / 1024
+
+	// Adjust for high-memory systems
+	if memGB > 32 {
+		suggestions.ChunkSizeRecommendation = 100000
+		suggestions.ReadAheadBuffers = 8
+	}
+
+	return suggestions
 }
 
 // stateHistoryAdapter adapts checkpoint.StateBackend to driver.TuningHistoryProvider.
@@ -232,23 +352,26 @@ func (a *stateHistoryAdapter) GetAITuningHistory(limit int) ([]driver.AITuningRe
 	result := make([]driver.AITuningRecord, len(records))
 	for i, r := range records {
 		result[i] = driver.AITuningRecord{
-			Timestamp:         r.Timestamp,
-			SourceDBType:      r.SourceDBType,
-			TargetDBType:      r.TargetDBType,
-			TotalTables:       r.TotalTables,
-			TotalRows:         r.TotalRows,
-			AvgRowSizeBytes:   r.AvgRowSizeBytes,
-			CPUCores:          r.CPUCores,
-			MemoryGB:          r.MemoryGB,
-			Workers:           r.Workers,
-			ChunkSize:         r.ChunkSize,
-			ReadAheadBuffers:  r.ReadAheadBuffers,
-			WriteAheadWriters: r.WriteAheadWriters,
-			ParallelReaders:   r.ParallelReaders,
-			MaxPartitions:     r.MaxPartitions,
-			EstimatedMemoryMB: r.EstimatedMemoryMB,
-			AIReasoning:       r.AIReasoning,
-			WasAIUsed:         r.WasAIUsed,
+			Timestamp:            r.Timestamp,
+			SourceDBType:         r.SourceDBType,
+			TargetDBType:         r.TargetDBType,
+			TotalTables:          r.TotalTables,
+			TotalRows:            r.TotalRows,
+			AvgRowSizeBytes:      r.AvgRowSizeBytes,
+			CPUCores:             r.CPUCores,
+			MemoryGB:             r.MemoryGB,
+			Workers:              r.Workers,
+			ChunkSize:            r.ChunkSize,
+			ReadAheadBuffers:     r.ReadAheadBuffers,
+			WriteAheadWriters:    r.WriteAheadWriters,
+			ParallelReaders:      r.ParallelReaders,
+			MaxPartitions:        r.MaxPartitions,
+			LargeTableThreshold:  r.LargeTableThreshold,
+			MaxSourceConnections: r.MaxSourceConns,
+			MaxTargetConnections: r.MaxTargetConns,
+			EstimatedMemoryMB:    r.EstimatedMemoryMB,
+			AIReasoning:          r.AIReasoning,
+			WasAIUsed:            r.WasAIUsed,
 		}
 	}
 	return result, nil
@@ -257,23 +380,26 @@ func (a *stateHistoryAdapter) GetAITuningHistory(limit int) ([]driver.AITuningRe
 // SaveAITuning saves a tuning recommendation for future reference.
 func (a *stateHistoryAdapter) SaveAITuning(record driver.AITuningRecord) error {
 	return a.state.SaveAITuning(checkpoint.AITuningRecord{
-		Timestamp:         record.Timestamp,
-		SourceDBType:      record.SourceDBType,
-		TargetDBType:      record.TargetDBType,
-		TotalTables:       record.TotalTables,
-		TotalRows:         record.TotalRows,
-		AvgRowSizeBytes:   record.AvgRowSizeBytes,
-		CPUCores:          record.CPUCores,
-		MemoryGB:          record.MemoryGB,
-		Workers:           record.Workers,
-		ChunkSize:         record.ChunkSize,
-		ReadAheadBuffers:  record.ReadAheadBuffers,
-		WriteAheadWriters: record.WriteAheadWriters,
-		ParallelReaders:   record.ParallelReaders,
-		MaxPartitions:     record.MaxPartitions,
-		EstimatedMemoryMB: record.EstimatedMemoryMB,
-		AIReasoning:       record.AIReasoning,
-		WasAIUsed:         record.WasAIUsed,
+		Timestamp:           record.Timestamp,
+		SourceDBType:        record.SourceDBType,
+		TargetDBType:        record.TargetDBType,
+		TotalTables:         record.TotalTables,
+		TotalRows:           record.TotalRows,
+		AvgRowSizeBytes:     record.AvgRowSizeBytes,
+		CPUCores:            record.CPUCores,
+		MemoryGB:            record.MemoryGB,
+		Workers:             record.Workers,
+		ChunkSize:           record.ChunkSize,
+		ReadAheadBuffers:    record.ReadAheadBuffers,
+		WriteAheadWriters:   record.WriteAheadWriters,
+		ParallelReaders:     record.ParallelReaders,
+		MaxPartitions:       record.MaxPartitions,
+		LargeTableThreshold: record.LargeTableThreshold,
+		MaxSourceConns:      record.MaxSourceConnections,
+		MaxTargetConns:      record.MaxTargetConnections,
+		EstimatedMemoryMB:   record.EstimatedMemoryMB,
+		AIReasoning:         record.AIReasoning,
+		WasAIUsed:           record.WasAIUsed,
 	})
 }
 

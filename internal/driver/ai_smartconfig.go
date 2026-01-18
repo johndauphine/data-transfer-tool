@@ -67,7 +67,8 @@ type AutoTuneInput struct {
 	MemoryGB int `json:"memory_gb"`
 
 	// Database info
-	DatabaseType string `json:"database_type"` // "mssql" or "postgres"
+	DatabaseType string `json:"database_type"`        // source: "mssql", "postgres", "mysql", "oracle"
+	TargetType   string `json:"target_type,omitempty"` // target database type
 	TotalTables  int    `json:"total_tables"`
 	TotalRows    int64  `json:"total_rows"`
 	AvgRowBytes  int64  `json:"avg_row_bytes"`
@@ -138,10 +139,13 @@ type AITuningRecord struct {
 	MemoryGB         int       `json:"memory_gb"`
 	Workers          int       `json:"workers"`
 	ChunkSize        int       `json:"chunk_size"`
-	ReadAheadBuffers int       `json:"read_ahead_buffers"`
+	ReadAheadBuffers  int      `json:"read_ahead_buffers"`
 	WriteAheadWriters int      `json:"write_ahead_writers"`
-	ParallelReaders  int       `json:"parallel_readers"`
-	MaxPartitions    int       `json:"max_partitions"`
+	ParallelReaders   int      `json:"parallel_readers"`
+	MaxPartitions     int      `json:"max_partitions"`
+	LargeTableThreshold  int64 `json:"large_table_threshold"`
+	MaxSourceConnections int   `json:"max_source_connections"`
+	MaxTargetConnections int   `json:"max_target_connections"`
 	EstimatedMemoryMB int64    `json:"estimated_memory_mb"`
 	AIReasoning      string    `json:"ai_reasoning"`
 	WasAIUsed        bool      `json:"was_ai_used"`
@@ -278,23 +282,26 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, wasAIUsed bo
 	}
 
 	record := AITuningRecord{
-		Timestamp:         time.Now(),
-		SourceDBType:      s.dbType,
-		TargetDBType:      s.targetDBType,
-		TotalTables:       s.suggestions.TotalTables,
-		TotalRows:         s.suggestions.TotalRows,
-		AvgRowSizeBytes:   s.suggestions.AvgRowSizeBytes,
-		CPUCores:          input.CPUCores,
-		MemoryGB:          input.MemoryGB,
-		Workers:           s.suggestions.Workers,
-		ChunkSize:         s.suggestions.ChunkSizeRecommendation,
-		ReadAheadBuffers:  s.suggestions.ReadAheadBuffers,
-		WriteAheadWriters: s.suggestions.WriteAheadWriters,
-		ParallelReaders:   s.suggestions.ParallelReaders,
-		MaxPartitions:     s.suggestions.MaxPartitions,
-		EstimatedMemoryMB: s.suggestions.EstimatedMemMB,
-		AIReasoning:       aiReasoning,
-		WasAIUsed:         wasAIUsed,
+		Timestamp:            time.Now(),
+		SourceDBType:         s.dbType,
+		TargetDBType:         s.targetDBType,
+		TotalTables:          s.suggestions.TotalTables,
+		TotalRows:            s.suggestions.TotalRows,
+		AvgRowSizeBytes:      s.suggestions.AvgRowSizeBytes,
+		CPUCores:             input.CPUCores,
+		MemoryGB:             input.MemoryGB,
+		Workers:              s.suggestions.Workers,
+		ChunkSize:            s.suggestions.ChunkSizeRecommendation,
+		ReadAheadBuffers:     s.suggestions.ReadAheadBuffers,
+		WriteAheadWriters:    s.suggestions.WriteAheadWriters,
+		ParallelReaders:      s.suggestions.ParallelReaders,
+		MaxPartitions:        s.suggestions.MaxPartitions,
+		LargeTableThreshold:  s.suggestions.LargeTableThreshold,
+		MaxSourceConnections: s.suggestions.MaxSourceConnections,
+		MaxTargetConnections: s.suggestions.MaxTargetConnections,
+		EstimatedMemoryMB:    s.suggestions.EstimatedMemMB,
+		AIReasoning:          aiReasoning,
+		WasAIUsed:            wasAIUsed,
 	}
 
 	if err := s.historyProvider.SaveAITuning(record); err != nil {
@@ -557,10 +564,122 @@ Respond with ONLY a JSON object:
 		output.ReadAheadBuffers = 2
 	}
 	if output.WriteAheadWriters < 1 {
-		output.WriteAheadWriters = 2
+		output.WriteAheadWriters = 1
 	}
 	if output.ParallelReaders < 1 {
-		output.ParallelReaders = 2
+		output.ParallelReaders = 1
+	}
+	if output.MaxPartitions < 1 {
+		output.MaxPartitions = output.Workers
+	}
+	if output.MaxSourceConnections < 1 {
+		output.MaxSourceConnections = output.Workers + output.ParallelReaders + 2
+	}
+	if output.MaxTargetConnections < 1 {
+		output.MaxTargetConnections = output.Workers*output.WriteAheadWriters + 2
+	}
+	if output.CheckpointFrequency < 1 {
+		output.CheckpointFrequency = 10
+	}
+	if output.MaxRetries < 1 {
+		output.MaxRetries = 3
+	}
+
+	return &output, nil
+}
+
+// GetOfflineAutoTune calls AI for parameter recommendations without needing a database connection.
+// This is useful when analyze is run without source/target connectivity.
+func GetOfflineAutoTune(ctx context.Context, input AutoTuneInput) (*AutoTuneOutput, error) {
+	aiMapper, err := NewAITypeMapperFromSecrets()
+	if err != nil {
+		return nil, fmt.Errorf("creating AI mapper: %w", err)
+	}
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling input: %w", err)
+	}
+
+	prompt := fmt.Sprintf(`You are a database migration performance expert. Recommend optimal configuration parameters based on the system environment.
+
+System and Database Info:
+%s
+
+Environment Context:
+- CPU cores: %d (consider reserving 1-2 for OS)
+- Available RAM: %dGB (consider what portion to use for migration buffers)
+- Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
+
+Parameters to tune:
+- workers: Parallel migration workers
+- chunk_size: Rows per batch (larger = higher throughput, but uses more memory)
+- read_ahead_buffers: Read buffers per worker
+- write_ahead_writers: Write threads per worker
+- parallel_readers: Parallel readers for large tables
+- max_partitions: Large table partitions (typically matches workers)
+- large_table_threshold: Row count before partitioning
+- max_source_connections: Source database connection pool size
+- max_target_connections: Target database connection pool size
+- upsert_merge_chunk_size: Batch size for upsert operations
+- checkpoint_frequency: How often to checkpoint progress
+- max_retries: Retry count for transient failures
+
+Guidelines:
+1. CHUNK SIZE is most important - larger = higher throughput, balance with available memory
+2. Workers should scale with CPU cores but leave headroom for the OS
+3. Connection pool sizes should accommodate workers plus overhead
+
+Respond with ONLY a JSON object:
+{
+  "workers": <int>,
+  "chunk_size": <int>,
+  "read_ahead_buffers": <int>,
+  "write_ahead_writers": <int>,
+  "parallel_readers": <int>,
+  "max_partitions": <int>,
+  "large_table_threshold": <int>,
+  "max_source_connections": <int>,
+  "max_target_connections": <int>,
+  "upsert_merge_chunk_size": <int>,
+  "checkpoint_frequency": <int>,
+  "max_retries": <int>,
+  "estimated_memory_mb": <int>,
+  "reasoning": "<brief explanation of choices>"
+}`, string(inputJSON), input.CPUCores, input.MemoryGB)
+
+	response, err := aiMapper.CallAI(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("calling AI: %w", err)
+	}
+
+	// Parse JSON response
+	response = strings.TrimSpace(response)
+	response = strings.TrimPrefix(response, "```json")
+	response = strings.TrimPrefix(response, "```")
+	response = strings.TrimSuffix(response, "```")
+	response = strings.TrimSpace(response)
+
+	var output AutoTuneOutput
+	if err := json.Unmarshal([]byte(response), &output); err != nil {
+		return nil, fmt.Errorf("parsing AI response: %w (response: %s)", err, response)
+	}
+
+	// Minimal sanity checks
+	if output.Workers < 1 {
+		output.Workers = 1
+	}
+	if output.ChunkSize < 1000 {
+		output.ChunkSize = 1000
+	}
+	if output.ReadAheadBuffers < 1 {
+		output.ReadAheadBuffers = 2
+	}
+	if output.WriteAheadWriters < 1 {
+		output.WriteAheadWriters = 1
+	}
+	if output.ParallelReaders < 1 {
+		output.ParallelReaders = 1
 	}
 	if output.MaxPartitions < 1 {
 		output.MaxPartitions = output.Workers
