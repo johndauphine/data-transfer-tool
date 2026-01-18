@@ -73,7 +73,7 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 // executeWrite handles both regular writes and upserts with chunking.
 func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]any) error {
 	if wp.useUpsert {
-		return wp.executeUpsertJob(writerID, rows)
+		return wp.executeUpsertJob(ctx, writerID, rows)
 	}
 	return wp.writer.WriteBatch(ctx, driver.WriteBatchOptions{
 		Schema:  wp.targetSchema,
@@ -84,7 +84,7 @@ func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]a
 }
 
 // executeUpsertJob executes an upsert job, chunking if necessary based on UpsertMergeChunkSize.
-func (wp *writerPool) executeUpsertJob(writerID int, rows [][]any) error {
+func (wp *writerPool) executeUpsertJob(ctx context.Context, writerID int, rows [][]any) error {
 	// Get current merge chunk size (supports mid-migration tuning)
 	mergeChunkSize := 5000 // default
 	if wp.upsertMergeChunkSizeFn != nil {
@@ -98,7 +98,7 @@ func (wp *writerPool) executeUpsertJob(writerID int, rows [][]any) error {
 
 	// If batch is small enough, execute directly
 	if len(rows) <= mergeChunkSize {
-		return wp.writer.UpsertBatch(wp.Context(), driver.UpsertBatchOptions{
+		return wp.writer.UpsertBatch(ctx, driver.UpsertBatchOptions{
 			Schema:      wp.targetSchema,
 			Table:       wp.targetTable,
 			Columns:     wp.targetCols,
@@ -121,7 +121,7 @@ func (wp *writerPool) executeUpsertJob(writerID int, rows [][]any) error {
 		}
 
 		chunk := rows[i:end]
-		if err := wp.writer.UpsertBatch(wp.Context(), driver.UpsertBatchOptions{
+		if err := wp.writer.UpsertBatch(ctx, driver.UpsertBatchOptions{
 			Schema:      wp.targetSchema,
 			Table:       wp.targetTable,
 			Columns:     wp.targetCols,

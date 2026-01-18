@@ -1,4 +1,4 @@
-// Package pool provides shared infrastructure for database connection pools.
+// Package pool provides shared infrastructure for database pools and parallel writer management.
 package pool
 
 import (
