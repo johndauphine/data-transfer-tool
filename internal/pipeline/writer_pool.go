@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/progress"
 )
 
@@ -198,6 +199,8 @@ func (wp *writerPool) executeUpsertJob(writerID int, rows [][]any) error {
 		}
 	}
 
+	logging.Debug("executeUpsertJob: rows=%d, mergeChunkSize=%d", len(rows), mergeChunkSize)
+
 	// If batch is small enough, execute directly
 	if len(rows) <= mergeChunkSize {
 		return wp.writer.UpsertBatch(wp.ctx, driver.UpsertBatchOptions{
@@ -214,6 +217,8 @@ func (wp *writerPool) executeUpsertJob(writerID int, rows [][]any) error {
 	}
 
 	// Chunk the rows to reduce memory pressure on target database
+	numChunks := (len(rows) + mergeChunkSize - 1) / mergeChunkSize
+	logging.Debug("Upsert chunking: %d rows into %d chunks of max %d rows", len(rows), numChunks, mergeChunkSize)
 	for i := 0; i < len(rows); i += mergeChunkSize {
 		end := i + mergeChunkSize
 		if end > len(rows) {
