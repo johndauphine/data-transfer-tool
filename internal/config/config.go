@@ -1163,6 +1163,9 @@ func (c *Config) DebugDump() string {
 			} else {
 				b.WriteString(fmt.Sprintf("  Model: %s (default)\n", provider.GetEffectiveModel(providerName)))
 			}
+			// AI features status (all enabled by default when provider is configured)
+			b.WriteString("  Type Mapping: enabled\n")
+			b.WriteString("  Error Diagnosis: enabled\n")
 			// AI adjust settings from migration_defaults
 			defaults := secretsCfg.GetMigrationDefaults()
 			if defaults.AIAdjust {
