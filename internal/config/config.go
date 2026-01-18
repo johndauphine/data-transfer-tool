@@ -1149,9 +1149,15 @@ func (c *Config) DebugDump() string {
 	b.WriteString("\nAI Features:\n")
 	if secretsErr == nil {
 		provider, providerName, err := secretsCfg.GetDefaultProvider()
-		if err == nil && provider != nil && provider.APIKey != "" {
+		// Check for valid provider: API-key-based (Claude, OpenAI) or local with BaseURL (Ollama, LMStudio)
+		if err == nil && provider != nil && (provider.APIKey != "" || provider.BaseURL != "") {
 			b.WriteString(fmt.Sprintf("  Provider: %s\n", providerName))
-			b.WriteString("  APIKey: [REDACTED]\n")
+			if provider.APIKey != "" {
+				b.WriteString("  APIKey: [REDACTED]\n")
+			}
+			if provider.BaseURL != "" {
+				b.WriteString(fmt.Sprintf("  BaseURL: %s\n", provider.BaseURL))
+			}
 			if provider.Model != "" {
 				b.WriteString(fmt.Sprintf("  Model: %s\n", provider.Model))
 			} else {
@@ -1169,7 +1175,7 @@ func (c *Config) DebugDump() string {
 				b.WriteString("  AI Adjust: disabled\n")
 			}
 		} else {
-			b.WriteString("  Disabled (no API key configured in ~/.secrets/dmt-config.yaml)\n")
+			b.WriteString("  Disabled (no provider configured in ~/.secrets/dmt-config.yaml)\n")
 		}
 	} else {
 		b.WriteString("  Disabled (no secrets file)\n")

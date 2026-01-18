@@ -360,8 +360,12 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Check if AI type mapping is enabled from global secrets
 	aiMappingEnabled := false
 	if secretsCfg, err := secrets.Load(); err == nil {
-		if provider, _, err := secretsCfg.GetDefaultProvider(); err == nil && provider != nil && provider.APIKey != "" {
-			aiMappingEnabled = true // AI is enabled if we have a valid provider with API key
+		if provider, _, err := secretsCfg.GetDefaultProvider(); err == nil && provider != nil {
+			// AI is enabled if we have a valid provider: either API-key-based (Claude, OpenAI)
+			// or local provider with BaseURL (Ollama, LMStudio)
+			if provider.APIKey != "" || provider.BaseURL != "" {
+				aiMappingEnabled = true
+			}
 		}
 	}
 	for i := range tables {

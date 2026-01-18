@@ -6,8 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/johndauphine/dmt/internal/secrets"
 )
 
 func TestNew(t *testing.T) {
@@ -482,6 +485,85 @@ func TestGetUsername(t *testing.T) {
 			t.Errorf("getUsername() = %q, want %q", got, "dmt")
 		}
 	})
+}
+
+func TestNewFromSecrets(t *testing.T) {
+	t.Run("missing secrets file returns disabled notifier", func(t *testing.T) {
+		secrets.Reset() // Clear cached secrets
+		// Point to non-existent secrets file
+		t.Setenv("DMT_SECRETS_FILE", "/nonexistent/path/to/secrets.yaml")
+
+		n := NewFromSecrets()
+		if n == nil {
+			t.Fatal("expected notifier, got nil")
+		}
+		if n.IsEnabled() {
+			t.Error("expected notifier to be disabled when secrets file missing")
+		}
+	})
+
+	t.Run("secrets without webhook returns disabled notifier", func(t *testing.T) {
+		secrets.Reset() // Clear cached secrets
+		// Create temp secrets file without webhook
+		tmpDir := t.TempDir()
+		secretsPath := tmpDir + "/secrets.yaml"
+		secretsContent := `
+ai:
+  default_provider: claude
+  providers:
+    claude:
+      api_key: "test-key"
+notifications:
+  slack:
+    webhook_url: ""
+`
+		if err := writeTestFile(t, secretsPath, secretsContent); err != nil {
+			t.Fatalf("failed to write secrets file: %v", err)
+		}
+		t.Setenv("DMT_SECRETS_FILE", secretsPath)
+
+		n := NewFromSecrets()
+		if n == nil {
+			t.Fatal("expected notifier, got nil")
+		}
+		if n.IsEnabled() {
+			t.Error("expected notifier to be disabled when webhook URL empty")
+		}
+	})
+
+	t.Run("secrets with webhook returns enabled notifier", func(t *testing.T) {
+		secrets.Reset() // Clear cached secrets
+		// Create temp secrets file with webhook
+		tmpDir := t.TempDir()
+		secretsPath := tmpDir + "/secrets.yaml"
+		secretsContent := `
+ai:
+  default_provider: claude
+  providers:
+    claude:
+      api_key: "test-key"
+notifications:
+  slack:
+    webhook_url: "https://hooks.slack.com/services/TEST"
+`
+		if err := writeTestFile(t, secretsPath, secretsContent); err != nil {
+			t.Fatalf("failed to write secrets file: %v", err)
+		}
+		t.Setenv("DMT_SECRETS_FILE", secretsPath)
+
+		n := NewFromSecrets()
+		if n == nil {
+			t.Fatal("expected notifier, got nil")
+		}
+		if !n.IsEnabled() {
+			t.Error("expected notifier to be enabled when webhook URL configured")
+		}
+	})
+}
+
+func writeTestFile(t *testing.T, path, content string) error {
+	t.Helper()
+	return os.WriteFile(path, []byte(content), 0600)
 }
 
 func TestFormatNumberWithCommas(t *testing.T) {
