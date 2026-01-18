@@ -325,12 +325,25 @@ func (c *Config) applyGlobalDefaults() {
 		c.Migration.ParallelReaders = defaults.ParallelReaders
 	}
 
-	// Note: Boolean settings (CreateIndexes, CreateForeignKeys, CreateCheckConstraints,
-	// StrictConsistency, SampleValidation) are NOT applied from global defaults.
-	// This is because Go's bool type defaults to false, making it impossible to
-	// distinguish between "not set in migration config" and "explicitly set to false".
-	// Applying global boolean defaults would prevent migrations from overriding to false.
-	// Users should set boolean values explicitly in their migration configs.
+	// Boolean settings - apply from global defaults when explicitly set (non-nil pointer)
+	// and the migration config hasn't set them to true.
+	// Note: This means you cannot override a global "true" to "false" per-migration,
+	// but you CAN override a global "false" to "true" per-migration.
+	if defaults.CreateIndexes != nil && !c.Migration.CreateIndexes {
+		c.Migration.CreateIndexes = *defaults.CreateIndexes
+	}
+	if defaults.CreateForeignKeys != nil && !c.Migration.CreateForeignKeys {
+		c.Migration.CreateForeignKeys = *defaults.CreateForeignKeys
+	}
+	if defaults.CreateCheckConstraints != nil && !c.Migration.CreateCheckConstraints {
+		c.Migration.CreateCheckConstraints = *defaults.CreateCheckConstraints
+	}
+	if defaults.StrictConsistency != nil && !c.Migration.StrictConsistency {
+		c.Migration.StrictConsistency = *defaults.StrictConsistency
+	}
+	if defaults.SampleValidation != nil && !c.Migration.SampleValidation {
+		c.Migration.SampleValidation = *defaults.SampleValidation
+	}
 	if c.Migration.SampleSize == 0 && defaults.SampleSize > 0 {
 		c.Migration.SampleSize = defaults.SampleSize
 	}
@@ -1176,7 +1189,7 @@ func (c *Config) DebugDump() string {
 			}
 			// AI adjust settings from migration_defaults
 			defaults := secretsCfg.GetMigrationDefaults()
-			if defaults.AIAdjust {
+			if defaults.AIAdjust != nil && *defaults.AIAdjust {
 				interval := defaults.AIAdjustInterval
 				if interval == "" {
 					interval = "30s"

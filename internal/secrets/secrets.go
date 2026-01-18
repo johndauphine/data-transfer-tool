@@ -43,15 +43,15 @@ type MigrationDefaults struct {
 	WriteAheadWriters int   `yaml:"write_ahead_writers,omitempty"` // Parallel writers per job
 	ParallelReaders   int   `yaml:"parallel_readers,omitempty"`    // Parallel readers per job
 
-	// Schema creation defaults
-	CreateIndexes          bool `yaml:"create_indexes"`           // Create non-PK indexes (default: true)
-	CreateForeignKeys      bool `yaml:"create_foreign_keys"`      // Create FK constraints (default: true)
-	CreateCheckConstraints bool `yaml:"create_check_constraints"` // Create CHECK constraints (default: false)
+	// Schema creation defaults (use *bool to distinguish "not set" from "false")
+	CreateIndexes          *bool `yaml:"create_indexes"`           // Create non-PK indexes (default: true)
+	CreateForeignKeys      *bool `yaml:"create_foreign_keys"`      // Create FK constraints (default: true)
+	CreateCheckConstraints *bool `yaml:"create_check_constraints"` // Create CHECK constraints (default: false)
 
 	// Consistency and validation
-	StrictConsistency bool `yaml:"strict_consistency"` // Use table locks instead of NOLOCK
-	SampleValidation  bool `yaml:"sample_validation"`  // Enable sample data validation
-	SampleSize        int  `yaml:"sample_size"`        // Rows to sample for validation
+	StrictConsistency *bool `yaml:"strict_consistency"` // Use table locks instead of NOLOCK
+	SampleValidation  *bool `yaml:"sample_validation"`  // Enable sample data validation
+	SampleSize        int   `yaml:"sample_size"`        // Rows to sample for validation
 
 	// Checkpoint and recovery
 	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks
@@ -59,7 +59,7 @@ type MigrationDefaults struct {
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days
 
 	// AI features (enabled by default when AI provider is configured)
-	AIAdjust         bool   `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment (default: true)
+	AIAdjust         *bool  `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment (default: true)
 	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
 
 	// Data directory
@@ -294,13 +294,14 @@ func (c *Config) GetMigrationDefaults() *MigrationDefaults {
 	defaults := c.MigrationDefaults
 
 	// Apply smart defaults for AI adjust:
-	// If ai_adjust wasn't explicitly set (defaults to false in Go),
+	// If ai_adjust wasn't explicitly set (nil pointer),
 	// enable it by default when an AI provider is configured
-	if !defaults.AIAdjust && defaults.AIAdjustInterval == "" {
+	if defaults.AIAdjust == nil && defaults.AIAdjustInterval == "" {
 		// Neither ai_adjust nor ai_adjust_interval was set - apply default
 		if provider, _, err := c.GetDefaultProvider(); err == nil && provider != nil {
 			if provider.APIKey != "" || provider.BaseURL != "" {
-				defaults.AIAdjust = true
+				aiAdjust := true
+				defaults.AIAdjust = &aiAdjust
 				defaults.AIAdjustInterval = "30s"
 			}
 		}
