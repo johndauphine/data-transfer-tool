@@ -111,7 +111,9 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	aiAdjustInterval := 30 * time.Second // Default
 	if secretsCfg, err := secrets.Load(); err == nil {
 		defaults := secretsCfg.GetMigrationDefaults()
-		aiAdjustEnabled = defaults.AIAdjust
+		if defaults.AIAdjust != nil {
+			aiAdjustEnabled = *defaults.AIAdjust
+		}
 		if defaults.AIAdjustInterval != "" {
 			if d, err := time.ParseDuration(defaults.AIAdjustInterval); err == nil {
 				aiAdjustInterval = d
