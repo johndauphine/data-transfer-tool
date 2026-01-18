@@ -14,6 +14,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
@@ -335,6 +336,10 @@ func main() {
 					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
+					},
+					&cli.BoolFlag{
+						Name:  "apply",
+						Usage: "Apply AI-tuned parameters to ~/.secrets/dmt-config.yaml",
 					},
 				},
 			},
@@ -946,7 +951,34 @@ func analyzeConfig(c *cli.Context) error {
 	// Output suggestions
 	fmt.Println(suggestions.FormatYAML())
 
+	// Apply AI-tuned parameters to secrets file if requested
+	if c.Bool("apply") {
+		if err := applyTuningToSecrets(suggestions); err != nil {
+			return fmt.Errorf("failed to apply tuning: %w", err)
+		}
+		fmt.Printf("\n✓ Applied AI-tuned parameters to %s\n", secrets.GetSecretsPath())
+	}
+
 	return nil
+}
+
+// applyTuningToSecrets writes AI-tuned parameters to the secrets file.
+func applyTuningToSecrets(suggestions *driver.SmartConfigSuggestions) error {
+	updates := &secrets.Config{
+		MigrationDefaults: secrets.MigrationDefaults{
+			Workers:              suggestions.Workers,
+			MaxSourceConnections: suggestions.MaxSourceConnections,
+			MaxTargetConnections: suggestions.MaxTargetConnections,
+			MaxMemoryMB:          suggestions.EstimatedMemMB,
+			ReadAheadBuffers:     suggestions.ReadAheadBuffers,
+			WriteAheadWriters:    suggestions.WriteAheadWriters,
+			ParallelReaders:      suggestions.ParallelReaders,
+			CheckpointFrequency:  suggestions.CheckpointFrequency,
+			MaxRetries:           suggestions.MaxRetries,
+		},
+	}
+
+	return secrets.Save(updates)
 }
 
 func boolToStatus(connected bool) string {

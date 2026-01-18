@@ -220,6 +220,113 @@ func loadFromFile() (*Config, error) {
 	return &config, nil
 }
 
+// Save writes the config to the secrets file, preserving existing fields.
+// It loads the current file first to preserve any fields not in the new config.
+func Save(updates *Config) error {
+	path := GetSecretsPath()
+
+	// Load existing config if it exists
+	existing := &Config{}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		_ = yaml.Unmarshal(data, existing)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("reading existing secrets file: %w", err)
+	}
+
+	// Merge updates into existing config
+	mergeConfig(existing, updates)
+
+	// Marshal the merged config
+	newData, err := yaml.Marshal(existing)
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+
+	// Ensure the directory exists
+	if _, err := EnsureSecretsDir(); err != nil {
+		return err
+	}
+
+	// Write with secure permissions
+	if err := os.WriteFile(path, newData, SecureFileMode); err != nil {
+		return fmt.Errorf("writing secrets file: %w", err)
+	}
+
+	// Reset the cached config so next Load() picks up changes
+	Reset()
+
+	return nil
+}
+
+// mergeConfig merges updates into existing config, only overwriting non-zero values.
+func mergeConfig(existing, updates *Config) {
+	// Only merge migration_defaults for now (the main use case)
+	mergeMigrationDefaults(&existing.MigrationDefaults, &updates.MigrationDefaults)
+}
+
+// mergeMigrationDefaults merges non-zero migration defaults.
+func mergeMigrationDefaults(existing, updates *MigrationDefaults) {
+	if updates.Workers > 0 {
+		existing.Workers = updates.Workers
+	}
+	if updates.MaxSourceConnections > 0 {
+		existing.MaxSourceConnections = updates.MaxSourceConnections
+	}
+	if updates.MaxTargetConnections > 0 {
+		existing.MaxTargetConnections = updates.MaxTargetConnections
+	}
+	if updates.MaxMemoryMB > 0 {
+		existing.MaxMemoryMB = updates.MaxMemoryMB
+	}
+	if updates.ReadAheadBuffers > 0 {
+		existing.ReadAheadBuffers = updates.ReadAheadBuffers
+	}
+	if updates.WriteAheadWriters > 0 {
+		existing.WriteAheadWriters = updates.WriteAheadWriters
+	}
+	if updates.ParallelReaders > 0 {
+		existing.ParallelReaders = updates.ParallelReaders
+	}
+	if updates.CheckpointFrequency > 0 {
+		existing.CheckpointFrequency = updates.CheckpointFrequency
+	}
+	if updates.MaxRetries > 0 {
+		existing.MaxRetries = updates.MaxRetries
+	}
+	if updates.SampleSize > 0 {
+		existing.SampleSize = updates.SampleSize
+	}
+	if updates.HistoryRetentionDays > 0 {
+		existing.HistoryRetentionDays = updates.HistoryRetentionDays
+	}
+	if updates.DataDir != "" {
+		existing.DataDir = updates.DataDir
+	}
+	if updates.AIAdjustInterval != "" {
+		existing.AIAdjustInterval = updates.AIAdjustInterval
+	}
+	// Boolean pointers - only update if explicitly set
+	if updates.CreateIndexes != nil {
+		existing.CreateIndexes = updates.CreateIndexes
+	}
+	if updates.CreateForeignKeys != nil {
+		existing.CreateForeignKeys = updates.CreateForeignKeys
+	}
+	if updates.CreateCheckConstraints != nil {
+		existing.CreateCheckConstraints = updates.CreateCheckConstraints
+	}
+	if updates.StrictConsistency != nil {
+		existing.StrictConsistency = updates.StrictConsistency
+	}
+	if updates.SampleValidation != nil {
+		existing.SampleValidation = updates.SampleValidation
+	}
+	if updates.AIAdjust != nil {
+		existing.AIAdjust = updates.AIAdjust
+	}
+}
+
 // Validate checks that the configuration is valid
 func (c *Config) Validate() error {
 	// AI settings are optional - only validate if configured
