@@ -51,11 +51,12 @@ const (
 
 // ConfigUpdate represents a requested configuration update with timing information.
 type ConfigUpdate struct {
-	ChunkSize         *int       // Pointer allows nil = "no change"
-	ReadAheadBuffers  *int
-	ParallelReaders   *int
-	WriteAheadWriters *int
-	ApplyAt           ApplyTiming
+	ChunkSize           *int // Pointer allows nil = "no change"
+	ReadAheadBuffers    *int
+	ParallelReaders     *int
+	WriteAheadWriters   *int
+	CheckpointFrequency *int
+	ApplyAt             ApplyTiming
 }
 
 // Pipeline orchestrates data transfer from a Reader to a Writer.
@@ -154,10 +155,14 @@ func (p *Pipeline) applyConfigUpdate(update ConfigUpdate) {
 		p.config.WriteAheadWriters = *update.WriteAheadWriters
 		changed = true
 	}
+	if update.CheckpointFrequency != nil && *update.CheckpointFrequency >= 1 {
+		p.config.CheckpointFrequency = *update.CheckpointFrequency
+		changed = true
+	}
 
 	if changed {
-		logging.Debug("Config updated: chunk_size=%d, readers=%d, writers=%d, buffers=%d",
-			p.config.ChunkSize, p.config.ParallelReaders, p.config.WriteAheadWriters, p.config.ReadAheadBuffers)
+		logging.Debug("Config updated: chunk_size=%d, readers=%d, writers=%d, buffers=%d, checkpoint_freq=%d",
+			p.config.ChunkSize, p.config.ParallelReaders, p.config.WriteAheadWriters, p.config.ReadAheadBuffers, p.config.CheckpointFrequency)
 	}
 }
 
@@ -416,8 +421,10 @@ func (p *Pipeline) executeKeysetPagination(
 		EnableAck:    enableAck,
 	})
 
-	// Setup checkpoint coordinator
-	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &wp.totalWritten, p.config.CheckpointFrequency)
+	// Setup checkpoint coordinator with dynamic checkpoint frequency (supports mid-migration tuning)
+	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &wp.totalWritten, func() int {
+		return p.GetConfig().CheckpointFrequency
+	})
 	if checkpointCoord != nil {
 		wp.startAckProcessor(checkpointCoord.onAck)
 	}
@@ -675,7 +682,6 @@ func (p *Pipeline) executeRowNumberPagination(
 	})
 
 	// Setup ROW_NUMBER checkpoint handler
-	checkpointFreq := p.config.CheckpointFrequency
 	lastCheckpointRowNum := initialRowNum
 
 	if enableAck {
@@ -693,6 +699,8 @@ func (p *Pipeline) executeRowNumberPagination(
 			for {
 				lastCheckpointRowNum = ack.rowNum
 				completedChunks++
+				// Read checkpoint frequency dynamically to allow mid-migration tuning
+				checkpointFreq := p.GetConfig().CheckpointFrequency
 				if completedChunks%checkpointFreq == 0 {
 					rowsDone := resumeRowsDone + wp.written()
 					if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows); err != nil {

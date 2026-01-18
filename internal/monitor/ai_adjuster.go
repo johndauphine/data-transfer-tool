@@ -323,6 +323,7 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 	sb.WriteString(fmt.Sprintf("- chunk_size: %d\n", config.ChunkSize))
 	sb.WriteString(fmt.Sprintf("- parallel_readers: %d\n", config.ParallelReaders))
 	sb.WriteString(fmt.Sprintf("- read_ahead_buffers: %d\n", config.ReadAheadBuffers))
+	sb.WriteString(fmt.Sprintf("- checkpoint_frequency: %d\n", config.CheckpointFrequency))
 	sb.WriteString("\n")
 
 	// Current session adjustment history
@@ -377,6 +378,7 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 Based on system resources above, determine safe parameter ranges:
 - workers: Should not exceed CPU cores or max DB connections
 - chunk_size: Larger = better throughput, but watch memory usage
+- checkpoint_frequency: Higher = fewer checkpoints = better throughput; Lower = more safety on failure
 
 Decision rules:
 1. **If within ±10% of baseline** → "continue" (stable, no changes needed)
@@ -384,15 +386,17 @@ Decision rules:
 3. **If memory >85%** → "reduce_chunk"
 4. **If CPU >90% sustained** → consider "scale_down"
 5. **If past adjustment didn't help** → don't repeat same action
+6. **If stable and low failure risk** → consider increasing checkpoint_frequency for throughput
 
 Important: Only adjust if there's a significant problem. Stability is preferred.
 
 Return ONLY valid JSON:
 {
-  "action": "continue|scale_up|scale_down|reduce_chunk",
+  "action": "continue|scale_up|scale_down|reduce_chunk|adjust_checkpoint",
   "adjustments": {
     "workers": <new value or omit>,
-    "chunk_size": <new value or omit>
+    "chunk_size": <new value or omit>,
+    "checkpoint_frequency": <new value or omit>
   },
   "reasoning": "<2-3 sentences explaining decision based on data>",
   "confidence": "high|medium|low"
@@ -471,6 +475,8 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 			update.ParallelReaders = &value
 		case "read_ahead_buffers":
 			update.ReadAheadBuffers = &value
+		case "checkpoint_frequency":
+			update.CheckpointFrequency = &value
 		default:
 			logging.Debug("AIAdjuster: unknown adjustment parameter %q (value=%d); ignoring", param, value)
 		}
@@ -609,6 +615,10 @@ func (aa *AIAdjuster) validateParameterWithResources(param string, value int) er
 	case "read_ahead_buffers":
 		if value < 2 || value > 32 {
 			return fmt.Errorf("read_ahead_buffers %d out of safe range (2-32)", value)
+		}
+	case "checkpoint_frequency":
+		if value < 1 || value > 100 {
+			return fmt.Errorf("checkpoint_frequency %d out of safe range (1-100)", value)
 		}
 	default:
 		return fmt.Errorf("unknown parameter: %s", param)

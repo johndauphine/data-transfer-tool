@@ -17,7 +17,7 @@ type keysetCheckpointCoordinator struct {
 	rowsTotal      int64
 	resumeRowsDone int64
 	totalWritten   *int64
-	checkpointFreq int
+	checkpointFreq func() int // Function to get current checkpoint frequency (supports mid-migration tuning)
 
 	states          []readerCheckpointState
 	completedChunks int
@@ -35,12 +35,11 @@ type readerCheckpointState struct {
 }
 
 // newKeysetCheckpointCoordinator creates a new checkpoint coordinator.
-func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone int64, totalWritten *int64, checkpointFreq int) *keysetCheckpointCoordinator {
+// The checkpointFreqFn function is called each time to get the current checkpoint frequency,
+// allowing mid-migration tuning of this parameter.
+func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone int64, totalWritten *int64, checkpointFreqFn func() int) *keysetCheckpointCoordinator {
 	if job.Saver == nil || job.TaskID <= 0 {
 		return nil
-	}
-	if checkpointFreq <= 0 {
-		checkpointFreq = 10
 	}
 
 	var partID *int
@@ -74,7 +73,7 @@ func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone 
 		rowsTotal:      rowsTotal,
 		resumeRowsDone: resumeRowsDone,
 		totalWritten:   totalWritten,
-		checkpointFreq: checkpointFreq,
+		checkpointFreq: checkpointFreqFn,
 		states:         states,
 	}
 }
@@ -98,7 +97,11 @@ func (c *keysetCheckpointCoordinator) onAck(ack writeAck) {
 	for {
 		c.applyAck(state, ack)
 		c.completedChunks++
-		if c.completedChunks%c.checkpointFreq == 0 {
+		checkpointFreq := c.checkpointFreq()
+		if checkpointFreq <= 0 {
+			checkpointFreq = 10 // Default fallback
+		}
+		if c.completedChunks%checkpointFreq == 0 {
 			safeLastPK := c.safeCheckpoint()
 			if safeLastPK != nil {
 				rowsDone := c.resumeRowsDone + atomic.LoadInt64(c.totalWritten)
