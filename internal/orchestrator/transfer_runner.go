@@ -391,13 +391,7 @@ func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err 
 	}
 
 	// Log the diagnosis
-	logging.Warn("  AI Diagnosis:")
-	logging.Warn("    Cause: %s", diagnosis.Cause)
-	logging.Warn("    Suggestions:")
-	for _, s := range diagnosis.Suggestions {
-		logging.Warn("      - %s", s)
-	}
-	logging.Warn("    Confidence: %s", diagnosis.Confidence)
+	logging.Warn("\n%s", diagnosis.Format())
 }
 
 // collectFailures gathers and deduplicates table failures.

@@ -208,3 +208,53 @@ func (d *AIErrorDiagnoser) ClearCache() {
 	d.cache = make(map[string]*ErrorDiagnosis)
 	d.mu.Unlock()
 }
+
+// DiagnoseSchemaError is a convenience function for diagnosing DDL/schema errors.
+// It creates a minimal context and returns a formatted diagnosis.
+func DiagnoseSchemaError(ctx context.Context, tableName, tableSchema, sourceDBType, targetDBType, operation string, err error) string {
+	// Get AI mapper
+	typeMapper, mapperErr := GetAITypeMapper()
+	if mapperErr != nil {
+		return ""
+	}
+	aiMapper, ok := typeMapper.(*AITypeMapper)
+	if !ok || aiMapper == nil {
+		return ""
+	}
+
+	diagnoser := NewAIErrorDiagnoser(aiMapper)
+	errCtx := &ErrorContext{
+		ErrorMessage: fmt.Sprintf("%s: %v", operation, err),
+		TableName:    tableName,
+		TableSchema:  tableSchema,
+		SourceDBType: sourceDBType,
+		TargetDBType: targetDBType,
+	}
+
+	diagnosis, diagErr := diagnoser.Diagnose(ctx, errCtx)
+	if diagErr != nil {
+		logging.Debug("AI error diagnosis unavailable: %v", diagErr)
+		return ""
+	}
+
+	return diagnosis.Format()
+}
+
+// Format returns a plain text representation of the diagnosis.
+// The TUI will apply its own styling/boxing.
+func (diag *ErrorDiagnosis) Format() string {
+	var sb strings.Builder
+
+	sb.WriteString("AI Error Diagnosis\n")
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("Cause: %s\n", diag.Cause))
+	sb.WriteString("\n")
+	sb.WriteString("Suggestions:\n")
+	for i, s := range diag.Suggestions {
+		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, s))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("Confidence: %s  |  Category: %s\n", diag.Confidence, diag.Category))
+
+	return sb.String()
+}

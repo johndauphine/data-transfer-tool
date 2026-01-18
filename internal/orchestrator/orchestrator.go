@@ -287,6 +287,8 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		cfg.Migration.CreateIndexes,
 		cfg.Migration.CreateForeignKeys,
 		cfg.Migration.CreateCheckConstraints,
+		cfg.Source.Type,
+		cfg.Target.Type,
 	)
 
 	return &Orchestrator{
