@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -28,8 +29,19 @@ type SmartConfigSuggestions struct {
 	// Auto-tuned performance parameters
 	Workers             int   // Recommended worker count (based on CPU cores)
 	ReadAheadBuffers    int   // Recommended read-ahead buffers
+	WriteAheadWriters   int   // Recommended write-ahead writers per job
+	ParallelReaders     int   // Recommended parallel readers per job
 	MaxPartitions       int   // Recommended max partitions for large tables
 	LargeTableThreshold int64 // Row count threshold for partitioning
+
+	// Connection pool tuning
+	MaxSourceConnections int // Recommended max source database connections
+	MaxTargetConnections int // Recommended max target database connections
+
+	// Additional tuning parameters
+	UpsertMergeChunkSize int // Recommended chunk size for upsert operations
+	CheckpointFrequency  int // Recommended checkpoint frequency (chunks)
+	MaxRetries           int // Recommended max retries for failed operations
 
 	// Database statistics
 	TotalTables     int   // Number of tables analyzed
@@ -76,19 +88,74 @@ type AutoTuneOutput struct {
 	Workers             int    `json:"workers"`
 	ChunkSize           int    `json:"chunk_size"`
 	ReadAheadBuffers    int    `json:"read_ahead_buffers"`
+	WriteAheadWriters   int    `json:"write_ahead_writers"`
+	ParallelReaders     int    `json:"parallel_readers"`
 	MaxPartitions       int    `json:"max_partitions"`
 	LargeTableThreshold int64  `json:"large_table_threshold"`
 	EstimatedMemoryMB   int64  `json:"estimated_memory_mb"`
-	Reasoning           string `json:"reasoning,omitempty"`
+
+	// Connection pool tuning
+	MaxSourceConnections int `json:"max_source_connections"`
+	MaxTargetConnections int `json:"max_target_connections"`
+
+	// Additional tuning
+	UpsertMergeChunkSize int    `json:"upsert_merge_chunk_size"`
+	CheckpointFrequency  int    `json:"checkpoint_frequency"`
+	MaxRetries           int    `json:"max_retries"`
+	Reasoning            string `json:"reasoning,omitempty"`
+}
+
+// TuningHistoryProvider provides access to historical tuning data.
+// This allows the analyzer to learn from past analyses and migrations.
+type TuningHistoryProvider interface {
+	// GetAIAdjustments returns recent runtime AI adjustments from migrations
+	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
+	// GetAITuningHistory returns recent tuning recommendations from analyze
+	GetAITuningHistory(limit int) ([]AITuningRecord, error)
+	// SaveAITuning saves a tuning recommendation for future reference
+	SaveAITuning(record AITuningRecord) error
+}
+
+// AIAdjustmentRecord represents a historical AI adjustment from runtime migration.
+type AIAdjustmentRecord struct {
+	Action           string         `json:"action"`
+	Adjustments      map[string]int `json:"adjustments"`
+	ThroughputBefore float64        `json:"throughput_before"`
+	ThroughputAfter  float64        `json:"throughput_after"`
+	EffectPercent    float64        `json:"effect_percent"`
+	Reasoning        string         `json:"reasoning"`
+}
+
+// AITuningRecord represents a historical AI tuning recommendation.
+type AITuningRecord struct {
+	Timestamp        time.Time `json:"timestamp"`
+	SourceDBType     string    `json:"source_db_type"`
+	TargetDBType     string    `json:"target_db_type"`
+	TotalTables      int       `json:"total_tables"`
+	TotalRows        int64     `json:"total_rows"`
+	AvgRowSizeBytes  int64     `json:"avg_row_size_bytes"`
+	CPUCores         int       `json:"cpu_cores"`
+	MemoryGB         int       `json:"memory_gb"`
+	Workers          int       `json:"workers"`
+	ChunkSize        int       `json:"chunk_size"`
+	ReadAheadBuffers int       `json:"read_ahead_buffers"`
+	WriteAheadWriters int      `json:"write_ahead_writers"`
+	ParallelReaders  int       `json:"parallel_readers"`
+	MaxPartitions    int       `json:"max_partitions"`
+	EstimatedMemoryMB int64    `json:"estimated_memory_mb"`
+	AIReasoning      string    `json:"ai_reasoning"`
+	WasAIUsed        bool      `json:"was_ai_used"`
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal configuration.
 type SmartConfigAnalyzer struct {
-	db          *sql.DB
-	dbType      string // "mssql" or "postgres"
-	aiMapper    *AITypeMapper
-	useAI       bool
-	suggestions *SmartConfigSuggestions
+	db              *sql.DB
+	dbType          string // "mssql" or "postgres"
+	targetDBType    string // target database type (if known)
+	aiMapper        *AITypeMapper
+	useAI           bool
+	suggestions     *SmartConfigSuggestions
+	historyProvider TuningHistoryProvider
 }
 
 // NewSmartConfigAnalyzer creates a new smart config analyzer.
@@ -104,6 +171,16 @@ func NewSmartConfigAnalyzer(db *sql.DB, dbType string, aiMapper *AITypeMapper) *
 			Warnings:      []string{},
 		},
 	}
+}
+
+// SetHistoryProvider sets the history provider for learning from past analyses.
+func (s *SmartConfigAnalyzer) SetHistoryProvider(provider TuningHistoryProvider) {
+	s.historyProvider = provider
+}
+
+// SetTargetDBType sets the target database type for more accurate recommendations.
+func (s *SmartConfigAnalyzer) SetTargetDBType(targetType string) {
+	s.targetDBType = targetType
 }
 
 // Analyze performs smart configuration detection on the source database.
@@ -164,20 +241,78 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(ctx context.Context, table
 	avgRowSize := s.calculateAvgRowSize(tables)
 	s.suggestions.AvgRowSizeBytes = avgRowSize
 
-	// Always calculate formula-based params
+	// Always calculate formula-based params first (as fallback)
 	s.calculateFormulaBasedParams(tables, avgRowSize)
 
-	// Also get AI suggestions if available (for comparison)
+	// Try AI tuning as primary source if available
+	wasAIUsed := false
+	var aiReasoning string
+	input := s.buildAutoTuneInput(tables, avgRowSize)
+
 	if s.useAI && s.aiMapper != nil {
-		input := s.buildAutoTuneInput(tables, avgRowSize)
 		output, err := s.getAIAutoTune(ctx, input)
 		if err == nil && output != nil {
+			// AI succeeded - use AI values as primary, keep formula as reference
 			s.suggestions.AISuggestions = output
-			logging.Debug("AI suggestions available (see output for comparison)")
+			s.applyAISuggestions(output)
+			wasAIUsed = true
+			aiReasoning = output.Reasoning
+			logging.Debug("AI tuning applied as primary source")
 		} else {
-			logging.Debug("AI auto-tune unavailable: %v", err)
+			logging.Debug("AI auto-tune unavailable, using formula-based: %v", err)
 		}
 	}
+
+	// Save tuning result for future reference
+	s.saveTuningResult(input, wasAIUsed, aiReasoning)
+}
+
+// saveTuningResult saves the tuning recommendation to history for future analyses.
+func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, wasAIUsed bool, aiReasoning string) {
+	if s.historyProvider == nil {
+		return
+	}
+
+	record := AITuningRecord{
+		Timestamp:         time.Now(),
+		SourceDBType:      s.dbType,
+		TargetDBType:      s.targetDBType,
+		TotalTables:       s.suggestions.TotalTables,
+		TotalRows:         s.suggestions.TotalRows,
+		AvgRowSizeBytes:   s.suggestions.AvgRowSizeBytes,
+		CPUCores:          input.CPUCores,
+		MemoryGB:          input.MemoryGB,
+		Workers:           s.suggestions.Workers,
+		ChunkSize:         s.suggestions.ChunkSizeRecommendation,
+		ReadAheadBuffers:  s.suggestions.ReadAheadBuffers,
+		WriteAheadWriters: s.suggestions.WriteAheadWriters,
+		ParallelReaders:   s.suggestions.ParallelReaders,
+		MaxPartitions:     s.suggestions.MaxPartitions,
+		EstimatedMemoryMB: s.suggestions.EstimatedMemMB,
+		AIReasoning:       aiReasoning,
+		WasAIUsed:         wasAIUsed,
+	}
+
+	if err := s.historyProvider.SaveAITuning(record); err != nil {
+		logging.Debug("Failed to save tuning history: %v", err)
+	}
+}
+
+// applyAISuggestions applies AI-recommended values to the suggestions.
+func (s *SmartConfigAnalyzer) applyAISuggestions(ai *AutoTuneOutput) {
+	s.suggestions.Workers = ai.Workers
+	s.suggestions.ChunkSizeRecommendation = ai.ChunkSize
+	s.suggestions.ReadAheadBuffers = ai.ReadAheadBuffers
+	s.suggestions.WriteAheadWriters = ai.WriteAheadWriters
+	s.suggestions.ParallelReaders = ai.ParallelReaders
+	s.suggestions.MaxPartitions = ai.MaxPartitions
+	s.suggestions.LargeTableThreshold = ai.LargeTableThreshold
+	s.suggestions.MaxSourceConnections = ai.MaxSourceConnections
+	s.suggestions.MaxTargetConnections = ai.MaxTargetConnections
+	s.suggestions.UpsertMergeChunkSize = ai.UpsertMergeChunkSize
+	s.suggestions.CheckpointFrequency = ai.CheckpointFrequency
+	s.suggestions.MaxRetries = ai.MaxRetries
+	s.suggestions.EstimatedMemMB = ai.EstimatedMemoryMB
 }
 
 // calculateAvgRowSize calculates average row size from top 5 largest tables.
@@ -237,6 +372,73 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize 
 	}
 }
 
+// formatHistoricalContext builds a historical context string from past tuning data.
+func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
+	if s.historyProvider == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+
+	// Get recent tuning recommendations
+	tuningHistory, err := s.historyProvider.GetAITuningHistory(5)
+	if err == nil && len(tuningHistory) > 0 {
+		sb.WriteString("\nHISTORICAL TUNING RECOMMENDATIONS (from similar analyses):\n")
+		for i, h := range tuningHistory {
+			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows):\n",
+				i+1, h.SourceDBType, h.Timestamp.Format("2006-01-02"),
+				h.TotalTables, formatRowCount(h.TotalRows)))
+			sb.WriteString(fmt.Sprintf("     workers=%d, chunk=%d, read_ahead=%d, write_ahead=%d\n",
+				h.Workers, h.ChunkSize, h.ReadAheadBuffers, h.WriteAheadWriters))
+			if h.AIReasoning != "" {
+				// Truncate long reasoning
+				reasoning := h.AIReasoning
+				if len(reasoning) > 100 {
+					reasoning = reasoning[:100] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("     reason: %s\n", reasoning))
+			}
+		}
+	}
+
+	// Get recent runtime adjustments (what worked during actual migrations)
+	adjustments, err := s.historyProvider.GetAIAdjustments(10)
+	if err == nil && len(adjustments) > 0 {
+		// Summarize adjustments by action type
+		actionStats := make(map[string]struct {
+			count      int
+			avgEffect  float64
+			totalRows  float64
+		})
+		for _, adj := range adjustments {
+			stat := actionStats[adj.Action]
+			stat.count++
+			stat.avgEffect += adj.EffectPercent
+			actionStats[adj.Action] = stat
+		}
+
+		sb.WriteString("\nRUNTIME ADJUSTMENT HISTORY (what worked during migrations):\n")
+		for action, stat := range actionStats {
+			avgEffect := stat.avgEffect / float64(stat.count)
+			sb.WriteString(fmt.Sprintf("  - %s: used %d times, avg effect: %.1f%% improvement\n",
+				action, stat.count, avgEffect))
+		}
+
+		// Show some specific examples with high positive effects
+		sb.WriteString("  Best performing adjustments:\n")
+		shown := 0
+		for _, adj := range adjustments {
+			if adj.EffectPercent > 10 && shown < 3 {
+				sb.WriteString(fmt.Sprintf("    - %s: %.1f%% improvement (before: %.0f rows/s, after: %.0f rows/s)\n",
+					adj.Action, adj.EffectPercent, adj.ThroughputBefore, adj.ThroughputAfter))
+				shown++
+			}
+		}
+	}
+
+	return sb.String()
+}
+
 // getAIAutoTune calls the AI to get auto-tuned parameters.
 func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneInput) (*AutoTuneOutput, error) {
 	inputJSON, err := json.Marshal(input)
@@ -244,47 +446,84 @@ func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneI
 		return nil, fmt.Errorf("marshaling input: %w", err)
 	}
 
-	prompt := fmt.Sprintf(`You are a database migration performance expert. Given the following system and database statistics, recommend optimal configuration parameters for a high-performance database migration tool.
+	// Get historical context from past analyses and migrations
+	historicalContext := s.formatHistoricalContext()
+
+	// Calculate environment-based guardrails (all derived from actual hardware)
+	// Max workers: CPU cores - 2 for OS overhead, minimum 2 for any parallelism
+	maxWorkers := input.CPUCores - 2
+	if maxWorkers < 2 {
+		maxWorkers = 2
+	}
+	// No arbitrary upper cap - let the hardware dictate (32-core machines can use more workers)
+
+	// Max memory: 50% of available RAM for migration buffers
+	maxMemoryMB := input.MemoryGB * 1024 / 2
+	if maxMemoryMB < 256 {
+		maxMemoryMB = 256 // Bare minimum to function
+	}
+
+	// Max connections: scale with workers, but also consider typical DB limits
+	// Formula: workers * 4 (for read/write parallelism) + overhead
+	maxConnections := maxWorkers * 4
+	if maxConnections < 10 {
+		maxConnections = 10
+	}
+	// Only cap at very high numbers to avoid overwhelming DBs
+	if input.CPUCores > 32 && maxConnections > 200 {
+		maxConnections = 200 // Even large systems rarely need more
+	}
+
+	prompt := fmt.Sprintf(`You are a database migration performance expert. Recommend optimal configuration parameters based on the system constraints and historical data.
 
 System and Database Info:
 %s
+%s
+HARD CONSTRAINTS (must not exceed):
+- max_workers: %d (based on %d CPU cores)
+- max_memory_mb: %d (50%% of %dGB RAM)
+- max_connections: %d per database
+- Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
+  This MUST be <= max_memory_mb
 
-The migration tool uses these parameters:
-- workers: Number of parallel worker goroutines (typically 4-12)
-- chunk_size: Rows per batch (typically 50,000-500,000)
-- read_ahead_buffers: Buffers per worker for pipelining (typically 2-16)
-- max_partitions: Max parallel partitions for large tables (typically matches workers)
-- large_table_threshold: Row count above which tables get partitioned (typically 1M-10M)
+Parameters to tune:
+- workers: Parallel workers (1-%d)
+- chunk_size: Rows per batch (10000-500000)
+- read_ahead_buffers: Read buffers per worker (2-16)
+- write_ahead_writers: Write threads per worker (2-4)
+- parallel_readers: Parallel readers (2-4)
+- max_partitions: Large table partitions (matches workers)
+- large_table_threshold: Rows before partitioning (500000-10000000)
+- max_source_connections: Source pool size (workers + parallel_readers + 2)
+- max_target_connections: Target pool size (workers * write_ahead_writers + 2)
+- upsert_merge_chunk_size: Upsert batch size (1000-10000)
+- checkpoint_frequency: Checkpoint interval (10-100)
+- max_retries: Retry count (2-5)
 
-Guidelines (in priority order):
-1. CHUNK SIZE IS THE MOST IMPORTANT PARAMETER - larger chunks = higher throughput
-   - ALWAYS use 100K-200K rows per chunk regardless of dataset size
-   - Minimum chunk_size should be 100000 rows
-   - Only reduce below 100K if avg_row_bytes > 1000 AND memory_gb < 8
-   - Even small datasets benefit from large chunks (reduces per-batch overhead)
+Guidelines:
+1. CHUNK SIZE is most important - larger = higher throughput, but must fit in memory
+2. Calculate memory usage and ensure it stays under max_memory_mb
+3. Balance parallelism with available CPU cores
+4. More workers = more connections needed
+5. Learn from historical data: if certain adjustments improved performance, consider applying them proactively
 
-2. workers should be cores-2 but capped at 12 (diminishing returns beyond)
-
-3. read_ahead_buffers: use 8-12 buffers (more than 12 has diminishing returns)
-   - Buffers matter less than chunk size - prioritize larger chunks first
-   - To derive optimal buffers from memory budget: read_ahead_buffers = available_memory / (workers * chunk_size * avg_row_bytes)
-
-4. PRIORITIZE THROUGHPUT over memory conservation - use up to 50%% of available memory
-   - Buffer memory formula: workers * read_ahead_buffers * chunk_size * avg_row_bytes
-   - Use this formula to calculate estimated_memory_mb in your response
-
-5. For large datasets (>1M rows), maximize chunk_size first, then adjust buffers to fit memory
-
-Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
+Respond with ONLY a JSON object:
 {
   "workers": <int>,
   "chunk_size": <int>,
   "read_ahead_buffers": <int>,
+  "write_ahead_writers": <int>,
+  "parallel_readers": <int>,
   "max_partitions": <int>,
   "large_table_threshold": <int>,
+  "max_source_connections": <int>,
+  "max_target_connections": <int>,
+  "upsert_merge_chunk_size": <int>,
+  "checkpoint_frequency": <int>,
+  "max_retries": <int>,
   "estimated_memory_mb": <int>,
-  "reasoning": "<brief 1-2 sentence explanation>"
-}`, string(inputJSON))
+  "reasoning": "<brief explanation of choices, referencing historical data if relevant>"
+}`, string(inputJSON), historicalContext, maxWorkers, input.CPUCores, maxMemoryMB, input.MemoryGB, maxConnections, maxWorkers)
 
 	response, err := s.aiMapper.CallAI(ctx, prompt)
 	if err != nil {
@@ -304,24 +543,118 @@ Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
 		return nil, fmt.Errorf("parsing AI response: %w (response: %s)", err, response)
 	}
 
-	// Validate output ranges
-	if output.Workers < 1 || output.Workers > 24 {
-		return nil, fmt.Errorf("invalid workers value: %d", output.Workers)
+	// Enforce guardrails - clamp values to valid ranges based on environment
+	// Workers: min 1, max based on CPU cores
+	if output.Workers < 1 {
+		output.Workers = 1
 	}
-	if output.ChunkSize < 1000 || output.ChunkSize > 1000000 {
-		return nil, fmt.Errorf("invalid chunk_size value: %d", output.ChunkSize)
+	if output.Workers > maxWorkers {
+		output.Workers = maxWorkers
 	}
-	if output.ReadAheadBuffers < 1 || output.ReadAheadBuffers > 64 {
-		return nil, fmt.Errorf("invalid read_ahead_buffers value: %d", output.ReadAheadBuffers)
+
+	// Chunk size: 10K-500K range
+	if output.ChunkSize < 10000 {
+		output.ChunkSize = 10000
 	}
+	if output.ChunkSize > 500000 {
+		output.ChunkSize = 500000
+	}
+
+	// Read-ahead buffers: 2-16 range
+	if output.ReadAheadBuffers < 2 {
+		output.ReadAheadBuffers = 2
+	}
+	if output.ReadAheadBuffers > 16 {
+		output.ReadAheadBuffers = 16
+	}
+
+	// Write-ahead writers: 2-4 range
+	if output.WriteAheadWriters < 2 {
+		output.WriteAheadWriters = 2
+	}
+	if output.WriteAheadWriters > 4 {
+		output.WriteAheadWriters = 4
+	}
+
+	// Parallel readers: 2-4 range
+	if output.ParallelReaders < 2 {
+		output.ParallelReaders = 2
+	}
+	if output.ParallelReaders > 4 {
+		output.ParallelReaders = 4
+	}
+
+	// Max partitions: match workers
+	if output.MaxPartitions < 1 {
+		output.MaxPartitions = output.Workers
+	}
+	if output.MaxPartitions > output.Workers {
+		output.MaxPartitions = output.Workers
+	}
+
+	// Connection limits
+	if output.MaxSourceConnections < output.Workers+2 {
+		output.MaxSourceConnections = output.Workers + output.ParallelReaders + 2
+	}
+	if output.MaxSourceConnections > maxConnections {
+		output.MaxSourceConnections = maxConnections
+	}
+	if output.MaxTargetConnections < output.Workers+2 {
+		output.MaxTargetConnections = output.Workers*output.WriteAheadWriters + 2
+	}
+	if output.MaxTargetConnections > maxConnections {
+		output.MaxTargetConnections = maxConnections
+	}
+
+	// Upsert chunk size: 1K-10K range
+	if output.UpsertMergeChunkSize < 1000 {
+		output.UpsertMergeChunkSize = 1000
+	}
+	if output.UpsertMergeChunkSize > 10000 {
+		output.UpsertMergeChunkSize = 10000
+	}
+
+	// Checkpoint frequency: 10-100 range
+	if output.CheckpointFrequency < 10 {
+		output.CheckpointFrequency = 10
+	}
+	if output.CheckpointFrequency > 100 {
+		output.CheckpointFrequency = 100
+	}
+
+	// Max retries: 2-5 range
+	if output.MaxRetries < 2 {
+		output.MaxRetries = 2
+	}
+	if output.MaxRetries > 5 {
+		output.MaxRetries = 5
+	}
+
+	// Validate memory usage - reduce chunk size if needed
+	estimatedMemMB := int64(output.Workers) * int64(output.ReadAheadBuffers+output.WriteAheadWriters) *
+		int64(output.ChunkSize) * input.AvgRowBytes / 1024 / 1024
+	if estimatedMemMB > int64(maxMemoryMB) {
+		// Reduce chunk size to fit in memory
+		safeChunkSize := int64(maxMemoryMB) * 1024 * 1024 /
+			(int64(output.Workers) * int64(output.ReadAheadBuffers+output.WriteAheadWriters) * input.AvgRowBytes)
+		if safeChunkSize < 10000 {
+			safeChunkSize = 10000
+		}
+		output.ChunkSize = int(safeChunkSize)
+		// Recalculate memory
+		estimatedMemMB = int64(output.Workers) * int64(output.ReadAheadBuffers+output.WriteAheadWriters) *
+			int64(output.ChunkSize) * input.AvgRowBytes / 1024 / 1024
+	}
+	output.EstimatedMemoryMB = estimatedMemMB
 
 	return &output, nil
 }
 
 // calculateFormulaBasedParams calculates parameters using formulas (fallback).
 func (s *SmartConfigAnalyzer) calculateFormulaBasedParams(tables []tableInfo, avgRowSize int64) {
-	// Workers: based on CPU cores (cores - 2, clamped to 4-12)
 	cores := runtime.NumCPU()
+
+	// Workers: based on CPU cores (cores - 2, clamped to 4-12)
 	s.suggestions.Workers = cores - 2
 	if s.suggestions.Workers < 4 {
 		s.suggestions.Workers = 4
@@ -346,6 +679,20 @@ func (s *SmartConfigAnalyzer) calculateFormulaBasedParams(tables []tableInfo, av
 		s.suggestions.ReadAheadBuffers = 16
 	}
 
+	// WriteAheadWriters: 2-4 parallel writers per worker for I/O pipelining
+	// More writers help when target database can handle concurrent inserts
+	s.suggestions.WriteAheadWriters = 2
+	if cores >= 8 {
+		s.suggestions.WriteAheadWriters = 3
+	}
+	if cores >= 16 {
+		s.suggestions.WriteAheadWriters = 4
+	}
+
+	// ParallelReaders: for reading partitioned tables concurrently
+	// Usually matches write-ahead writers to balance I/O pipeline
+	s.suggestions.ParallelReaders = s.suggestions.WriteAheadWriters
+
 	// MaxPartitions: match workers for parallel processing
 	s.suggestions.MaxPartitions = s.suggestions.Workers
 
@@ -353,9 +700,47 @@ func (s *SmartConfigAnalyzer) calculateFormulaBasedParams(tables []tableInfo, av
 	// Default 1M rows - tables larger than this benefit from parallel partitioning
 	s.suggestions.LargeTableThreshold = 1000000
 
+	// Connection pool tuning: based on workers and parallel I/O
+	// Source needs connections for workers + parallel readers
+	s.suggestions.MaxSourceConnections = s.suggestions.Workers + s.suggestions.ParallelReaders + 2
+	// Target needs connections for workers + write-ahead writers
+	s.suggestions.MaxTargetConnections = s.suggestions.Workers + s.suggestions.WriteAheadWriters*s.suggestions.Workers + 2
+	// Cap at reasonable maximums
+	if s.suggestions.MaxSourceConnections > 50 {
+		s.suggestions.MaxSourceConnections = 50
+	}
+	if s.suggestions.MaxTargetConnections > 100 {
+		s.suggestions.MaxTargetConnections = 100
+	}
+
+	// UpsertMergeChunkSize: smaller chunks for upsert to avoid lock contention
+	// Typically 20-50% of regular chunk size
+	s.suggestions.UpsertMergeChunkSize = s.suggestions.ChunkSizeRecommendation / 3
+	if s.suggestions.UpsertMergeChunkSize < 1000 {
+		s.suggestions.UpsertMergeChunkSize = 1000
+	}
+	if s.suggestions.UpsertMergeChunkSize > 10000 {
+		s.suggestions.UpsertMergeChunkSize = 10000
+	}
+
+	// CheckpointFrequency: save state every N chunks for resumability
+	// More frequent checkpoints = better resumability but more I/O
+	// Base on total data size - larger migrations need less frequent checkpoints
+	if s.suggestions.TotalRows > 100000000 { // > 100M rows
+		s.suggestions.CheckpointFrequency = 50
+	} else if s.suggestions.TotalRows > 10000000 { // > 10M rows
+		s.suggestions.CheckpointFrequency = 20
+	} else {
+		s.suggestions.CheckpointFrequency = 10
+	}
+
+	// MaxRetries: retry failed chunks before giving up
+	// More retries for larger/longer migrations
+	s.suggestions.MaxRetries = 3
+
 	// EstimatedMemoryMB: calculate expected memory usage
 	// Formula: workers * (read_ahead + write_ahead) * chunk_size * avg_row_size
-	totalBuffers := int64(s.suggestions.ReadAheadBuffers) * 2 // read + write queues
+	totalBuffers := int64(s.suggestions.ReadAheadBuffers + s.suggestions.WriteAheadWriters)
 	s.suggestions.EstimatedMemMB = (int64(s.suggestions.Workers) * totalBuffers *
 		int64(s.suggestions.ChunkSizeRecommendation) * avgRowSize) / (1024 * 1024)
 }
@@ -626,28 +1011,31 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 
 	sb.WriteString("migration:\n")
 
-	// Auto-tuned performance parameters (formula-based)
-	sb.WriteString("  # Auto-tuned performance parameters (formula-based)\n")
-	sb.WriteString(fmt.Sprintf("  workers: %d                    # CPU cores - 2, capped 4-12\n", s.Workers))
-	sb.WriteString(fmt.Sprintf("  chunk_size: %d              # ~50MB per chunk\n", s.ChunkSizeRecommendation))
-	sb.WriteString(fmt.Sprintf("  read_ahead_buffers: %d           # memory budget / chunk size\n", s.ReadAheadBuffers))
-	sb.WriteString(fmt.Sprintf("  max_partitions: %d              # matches worker count\n", s.MaxPartitions))
-	sb.WriteString(fmt.Sprintf("  large_table_threshold: %d  # rows before partitioning\n", s.LargeTableThreshold))
+	// Indicate source of tuning
+	if s.AISuggestions != nil {
+		sb.WriteString("  # AI-tuned parameters (powered by AI analysis)\n")
+	} else {
+		sb.WriteString("  # Formula-based parameters (configure AI for smarter tuning)\n")
+	}
+
+	// Performance parameters
+	sb.WriteString(fmt.Sprintf("  workers: %d\n", s.Workers))
+	sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", s.ChunkSizeRecommendation))
+	sb.WriteString(fmt.Sprintf("  read_ahead_buffers: %d\n", s.ReadAheadBuffers))
+	sb.WriteString(fmt.Sprintf("  write_ahead_writers: %d\n", s.WriteAheadWriters))
+	sb.WriteString(fmt.Sprintf("  parallel_readers: %d\n", s.ParallelReaders))
+	sb.WriteString(fmt.Sprintf("  max_partitions: %d\n", s.MaxPartitions))
+	sb.WriteString(fmt.Sprintf("  large_table_threshold: %d\n", s.LargeTableThreshold))
+	sb.WriteString(fmt.Sprintf("  max_source_connections: %d\n", s.MaxSourceConnections))
+	sb.WriteString(fmt.Sprintf("  max_target_connections: %d\n", s.MaxTargetConnections))
+	sb.WriteString(fmt.Sprintf("  upsert_merge_chunk_size: %d\n", s.UpsertMergeChunkSize))
+	sb.WriteString(fmt.Sprintf("  checkpoint_frequency: %d\n", s.CheckpointFrequency))
+	sb.WriteString(fmt.Sprintf("  max_retries: %d\n", s.MaxRetries))
 	sb.WriteString(fmt.Sprintf("  # Estimated memory: ~%dMB\n", s.EstimatedMemMB))
 
-	// Show AI suggestions if available
-	if s.AISuggestions != nil {
-		ai := s.AISuggestions
-		sb.WriteString("\n  # AI-suggested alternatives (configure ai.api_key to enable):\n")
-		sb.WriteString(fmt.Sprintf("  # workers: %d\n", ai.Workers))
-		sb.WriteString(fmt.Sprintf("  # chunk_size: %d\n", ai.ChunkSize))
-		sb.WriteString(fmt.Sprintf("  # read_ahead_buffers: %d\n", ai.ReadAheadBuffers))
-		sb.WriteString(fmt.Sprintf("  # max_partitions: %d\n", ai.MaxPartitions))
-		sb.WriteString(fmt.Sprintf("  # large_table_threshold: %d\n", ai.LargeTableThreshold))
-		sb.WriteString(fmt.Sprintf("  # Estimated memory: ~%dMB\n", ai.EstimatedMemoryMB))
-		if ai.Reasoning != "" {
-			sb.WriteString(fmt.Sprintf("  # Reasoning: %s\n", ai.Reasoning))
-		}
+	// Show AI reasoning if available
+	if s.AISuggestions != nil && s.AISuggestions.Reasoning != "" {
+		sb.WriteString(fmt.Sprintf("  # AI reasoning: %s\n", s.AISuggestions.Reasoning))
 	}
 	sb.WriteString("\n")
 
@@ -718,7 +1106,13 @@ func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseT
 	sb.WriteString("#" + strings.Repeat("-", 78) + "\n\n")
 
 	if len(tuning.Recommendations) == 0 {
-		sb.WriteString(fmt.Sprintf("# ✓ No tuning needed - %s database is already well-configured!\n\n", tuning.Role))
+		if tuning.TuningPotential == "unknown" {
+			// Analysis failed or wasn't performed
+			sb.WriteString(fmt.Sprintf("# ⚠ Unable to analyze %s database tuning\n", tuning.Role))
+			sb.WriteString(fmt.Sprintf("# Reason: %s\n\n", tuning.EstimatedImpact))
+		} else {
+			sb.WriteString(fmt.Sprintf("# ✓ No tuning needed - %s database is already well-configured!\n\n", tuning.Role))
+		}
 		return sb.String()
 	}
 

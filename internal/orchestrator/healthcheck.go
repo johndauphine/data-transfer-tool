@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -171,6 +172,16 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	// Create the smart config analyzer
 	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType(), aiMapper)
 
+	// Set up history provider using the state backend for learning from past analyses
+	if o.state != nil {
+		analyzer.SetHistoryProvider(&stateHistoryAdapter{state: o.state})
+	}
+
+	// Set target database type for more accurate recommendations
+	if o.targetPool != nil {
+		analyzer.SetTargetDBType(o.targetPool.DBType())
+	}
+
 	// Run analysis
 	suggestions, err := analyzer.Analyze(ctx, schema)
 	if err != nil {
@@ -181,6 +192,89 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	o.addDatabaseTuningRecommendations(ctx, suggestions, aiMapper)
 
 	return suggestions, nil
+}
+
+// stateHistoryAdapter adapts checkpoint.StateBackend to driver.TuningHistoryProvider.
+type stateHistoryAdapter struct {
+	state checkpoint.StateBackend
+}
+
+// GetAIAdjustments returns recent runtime AI adjustments from migrations.
+func (a *stateHistoryAdapter) GetAIAdjustments(limit int) ([]driver.AIAdjustmentRecord, error) {
+	records, err := a.state.GetAIAdjustments(limit)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert checkpoint records to driver records
+	result := make([]driver.AIAdjustmentRecord, len(records))
+	for i, r := range records {
+		result[i] = driver.AIAdjustmentRecord{
+			Action:           r.Action,
+			Adjustments:      r.Adjustments,
+			ThroughputBefore: r.ThroughputBefore,
+			ThroughputAfter:  r.ThroughputAfter,
+			EffectPercent:    r.EffectPercent,
+			Reasoning:        r.Reasoning,
+		}
+	}
+	return result, nil
+}
+
+// GetAITuningHistory returns recent tuning recommendations from analyze.
+func (a *stateHistoryAdapter) GetAITuningHistory(limit int) ([]driver.AITuningRecord, error) {
+	records, err := a.state.GetAITuningHistory(limit)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert checkpoint records to driver records
+	result := make([]driver.AITuningRecord, len(records))
+	for i, r := range records {
+		result[i] = driver.AITuningRecord{
+			Timestamp:         r.Timestamp,
+			SourceDBType:      r.SourceDBType,
+			TargetDBType:      r.TargetDBType,
+			TotalTables:       r.TotalTables,
+			TotalRows:         r.TotalRows,
+			AvgRowSizeBytes:   r.AvgRowSizeBytes,
+			CPUCores:          r.CPUCores,
+			MemoryGB:          r.MemoryGB,
+			Workers:           r.Workers,
+			ChunkSize:         r.ChunkSize,
+			ReadAheadBuffers:  r.ReadAheadBuffers,
+			WriteAheadWriters: r.WriteAheadWriters,
+			ParallelReaders:   r.ParallelReaders,
+			MaxPartitions:     r.MaxPartitions,
+			EstimatedMemoryMB: r.EstimatedMemoryMB,
+			AIReasoning:       r.AIReasoning,
+			WasAIUsed:         r.WasAIUsed,
+		}
+	}
+	return result, nil
+}
+
+// SaveAITuning saves a tuning recommendation for future reference.
+func (a *stateHistoryAdapter) SaveAITuning(record driver.AITuningRecord) error {
+	return a.state.SaveAITuning(checkpoint.AITuningRecord{
+		Timestamp:         record.Timestamp,
+		SourceDBType:      record.SourceDBType,
+		TargetDBType:      record.TargetDBType,
+		TotalTables:       record.TotalTables,
+		TotalRows:         record.TotalRows,
+		AvgRowSizeBytes:   record.AvgRowSizeBytes,
+		CPUCores:          record.CPUCores,
+		MemoryGB:          record.MemoryGB,
+		Workers:           record.Workers,
+		ChunkSize:         record.ChunkSize,
+		ReadAheadBuffers:  record.ReadAheadBuffers,
+		WriteAheadWriters: record.WriteAheadWriters,
+		ParallelReaders:   record.ParallelReaders,
+		MaxPartitions:     record.MaxPartitions,
+		EstimatedMemoryMB: record.EstimatedMemoryMB,
+		AIReasoning:       record.AIReasoning,
+		WasAIUsed:         record.WasAIUsed,
+	})
 }
 
 // addDatabaseTuningRecommendations adds source and target database tuning recommendations.
@@ -221,19 +315,33 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 				stats,
 				aiMapper,
 			)
-			if err != nil {
-				logging.Warn("Failed to analyze source database tuning: %v", err)
-				return
-			}
 
 			mu.Lock()
-			suggestions.SourceTuning = sourceTuning
-			mu.Unlock()
-
-			if sourceTuning.TuningPotential != "unknown" {
-				logging.Info("Source tuning: %s potential (%s)", sourceTuning.TuningPotential, sourceTuning.EstimatedImpact)
+			if err != nil {
+				logging.Warn("Failed to analyze source database tuning: %v", err)
+				// Set fallback tuning so output is consistent
+				suggestions.SourceTuning = &dbtuning.DatabaseTuning{
+					DatabaseType:    o.sourcePool.DBType(),
+					Role:            "source",
+					TuningPotential: "unknown",
+					EstimatedImpact: fmt.Sprintf("Analysis failed: %v", err),
+				}
+			} else {
+				suggestions.SourceTuning = sourceTuning
+				if sourceTuning.TuningPotential != "unknown" {
+					logging.Info("Source tuning: %s potential (%s)", sourceTuning.TuningPotential, sourceTuning.EstimatedImpact)
+				}
 			}
+			mu.Unlock()
 		}()
+	} else {
+		// No source pool available
+		suggestions.SourceTuning = &dbtuning.DatabaseTuning{
+			DatabaseType:    "unknown",
+			Role:            "source",
+			TuningPotential: "unknown",
+			EstimatedImpact: "Source database not available for analysis",
+		}
 	}
 
 	// Analyze target database tuning using AI-driven approach (concurrent)
@@ -255,19 +363,33 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 				stats,
 				aiMapper,
 			)
-			if err != nil {
-				logging.Warn("Failed to analyze target database tuning: %v", err)
-				return
-			}
 
 			mu.Lock()
-			suggestions.TargetTuning = targetTuning
-			mu.Unlock()
-
-			if targetTuning.TuningPotential != "unknown" {
-				logging.Info("Target tuning: %s potential (%s)", targetTuning.TuningPotential, targetTuning.EstimatedImpact)
+			if err != nil {
+				logging.Warn("Failed to analyze target database tuning: %v", err)
+				// Set fallback tuning so output is consistent
+				suggestions.TargetTuning = &dbtuning.DatabaseTuning{
+					DatabaseType:    o.targetPool.DBType(),
+					Role:            "target",
+					TuningPotential: "unknown",
+					EstimatedImpact: fmt.Sprintf("Analysis failed: %v", err),
+				}
+			} else {
+				suggestions.TargetTuning = targetTuning
+				if targetTuning.TuningPotential != "unknown" {
+					logging.Info("Target tuning: %s potential (%s)", targetTuning.TuningPotential, targetTuning.EstimatedImpact)
+				}
 			}
+			mu.Unlock()
 		}()
+	} else {
+		// No target pool available
+		suggestions.TargetTuning = &dbtuning.DatabaseTuning{
+			DatabaseType:    "unknown",
+			Role:            "target",
+			TuningPotential: "unknown",
+			EstimatedImpact: "Target database not available for analysis",
+		}
 	}
 
 	// Wait for all analyses to complete before returning
