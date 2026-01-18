@@ -119,6 +119,7 @@ var availableCommands = []commandInfo{
 	{"/run", "Start migration (default: config.yaml)"},
 	{"/resume", "Resume an interrupted migration"},
 	{"/validate", "Validate migration row counts"},
+	{"/config", "Show configuration details"},
 	{"/analyze", "Analyze source database and suggest config"},
 	{"/calibrate", "Run AI calibration to find optimal config"},
 	{"/status", "Show migration status (--detailed for tasks)"},
