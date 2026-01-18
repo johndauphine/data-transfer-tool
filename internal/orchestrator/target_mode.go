@@ -69,7 +69,7 @@ func (s *dropRecreateStrategy) ModeName() string {
 }
 
 func (s *dropRecreateStrategy) ShouldTruncateBeforeTransfer() bool {
-	return true
+	return false // Tables are already empty after drop and recreate
 }
 
 func (s *dropRecreateStrategy) PrepareTables(ctx context.Context, tables []source.Table) error {
