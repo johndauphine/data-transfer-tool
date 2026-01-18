@@ -38,6 +38,35 @@ type AIErrorDiagnoser struct {
 	mu       sync.RWMutex
 }
 
+// Package-level singleton for shared caching across DDL operations
+var (
+	globalDiagnoser   *AIErrorDiagnoser
+	globalDiagnoserMu sync.Mutex
+)
+
+// getGlobalDiagnoser returns a shared diagnoser instance for caching.
+func getGlobalDiagnoser() *AIErrorDiagnoser {
+	globalDiagnoserMu.Lock()
+	defer globalDiagnoserMu.Unlock()
+
+	if globalDiagnoser != nil {
+		return globalDiagnoser
+	}
+
+	// Try to create a new diagnoser
+	typeMapper, err := GetAITypeMapper()
+	if err != nil {
+		return nil
+	}
+	aiMapper, ok := typeMapper.(*AITypeMapper)
+	if !ok || aiMapper == nil {
+		return nil
+	}
+
+	globalDiagnoser = NewAIErrorDiagnoser(aiMapper)
+	return globalDiagnoser
+}
+
 // NewAIErrorDiagnoser creates a new AI-powered error diagnoser.
 func NewAIErrorDiagnoser(mapper *AITypeMapper) *AIErrorDiagnoser {
 	return &AIErrorDiagnoser{
@@ -210,19 +239,13 @@ func (d *AIErrorDiagnoser) ClearCache() {
 }
 
 // DiagnoseSchemaError is a convenience function for diagnosing DDL/schema errors.
-// It creates a minimal context and returns a formatted diagnosis.
+// It uses a shared diagnoser instance for caching across multiple calls.
 func DiagnoseSchemaError(ctx context.Context, tableName, tableSchema, sourceDBType, targetDBType, operation string, err error) string {
-	// Get AI mapper
-	typeMapper, mapperErr := GetAITypeMapper()
-	if mapperErr != nil {
-		return ""
-	}
-	aiMapper, ok := typeMapper.(*AITypeMapper)
-	if !ok || aiMapper == nil {
+	diagnoser := getGlobalDiagnoser()
+	if diagnoser == nil {
 		return ""
 	}
 
-	diagnoser := NewAIErrorDiagnoser(aiMapper)
 	errCtx := &ErrorContext{
 		ErrorMessage: fmt.Sprintf("%s: %v", operation, err),
 		TableName:    tableName,

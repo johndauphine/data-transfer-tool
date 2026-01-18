@@ -39,8 +39,6 @@ func NewTargetModeStrategy(targetMode string, targetPool pool.TargetPool, target
 		return &upsertStrategy{
 			targetPool:   targetPool,
 			targetSchema: targetSchema,
-			sourceType:   sourceType,
-			targetType:   targetType,
 		}
 	}
 	return &dropRecreateStrategy{
@@ -244,8 +242,6 @@ func (s *dropRecreateStrategy) Finalize(ctx context.Context, tables []source.Tab
 type upsertStrategy struct {
 	targetPool   pool.TargetPool
 	targetSchema string
-	sourceType   string
-	targetType   string
 }
 
 func (s *upsertStrategy) ModeName() string {
