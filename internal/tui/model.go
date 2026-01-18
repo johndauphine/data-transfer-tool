@@ -22,7 +22,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Maximum lines to keep in content buffer to prevent memory growth
+// maxContentLines limits output retained in memory to prevent unbounded growth
+// during long migrations or verbose commands. 2000 lines provides sufficient
+// scrollback for interactive use while keeping memory bounded.
 const maxContentLines = 2000
 
 // safeCmd wraps a tea.Cmd to recover from panics
@@ -710,18 +712,12 @@ func (m Model) welcomeMessage() string {
 	return welcome + body + tips
 }
 
-// parseCommand separates command and args for cleaner handling
-func parseCommand(input string) (string, []string) {
-	parts := strings.Fields(input)
-	if len(parts) == 0 {
-		return "", nil
-	}
-	return parts[0], parts[1:]
-}
-
 func (m *Model) handleCommand(cmdStr string) tea.Cmd {
-	cmd, _ := parseCommand(cmdStr)
 	parts := strings.Fields(cmdStr)
+	if len(parts) == 0 {
+		return nil
+	}
+	cmd := parts[0]
 
 	// Handle shell commands (starting with !)
 	if strings.HasPrefix(cmd, "!") {
@@ -2030,7 +2026,9 @@ func loadProfileConfig(name string) (*config.Config, error) {
 	return config.LoadBytes(blob)
 }
 
-// wrapLine wraps a line of text to fit within the specified width
+// wrapLine wraps text to fit within width, preserving word boundaries where
+// possible. Words longer than width are split at the boundary. Whitespace
+// is preserved as separate tokens to maintain formatting.
 func wrapLine(line string, width int) string {
 	if width <= 0 || len(line) <= width {
 		return line
@@ -2096,7 +2094,7 @@ func Start() error {
 
 	SetProgramRef(p)
 
-	cleanup := CaptureOutput(p, "")
+	cleanup := CaptureOutput(p)
 	defer cleanup()
 
 	if _, err := p.Run(); err != nil {

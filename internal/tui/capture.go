@@ -11,7 +11,7 @@ import (
 )
 
 // CaptureOutput pipes stdout and stderr to a channel that feeds the TUI
-func CaptureOutput(p *tea.Program, _ string) func() {
+func CaptureOutput(p *tea.Program) func() {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return func() {}
