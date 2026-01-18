@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
 	"github.com/johndauphine/dmt/internal/version"
@@ -1990,6 +1991,12 @@ func Start() error {
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	SetProgramRef(p)
+
+	// Register diagnosis handler to format as BoxedOutputMsg
+	driver.SetDiagnosisHandler(func(diagnosis *driver.ErrorDiagnosis) {
+		p.Send(BoxedOutputMsg(diagnosis.Format()))
+	})
+	defer driver.SetDiagnosisHandler(nil) // Cleanup on exit
 
 	cleanup := CaptureOutput(p)
 	defer cleanup()

@@ -44,6 +44,37 @@ var (
 	globalDiagnoserMu sync.Mutex
 )
 
+// DiagnosisHandler is a callback function for handling diagnosis output.
+// The TUI can register a handler to receive diagnoses and format them as BoxedOutputMsg.
+type DiagnosisHandler func(diagnosis *ErrorDiagnosis)
+
+var (
+	diagnosisHandler   DiagnosisHandler
+	diagnosisHandlerMu sync.RWMutex
+)
+
+// SetDiagnosisHandler registers a callback to receive diagnosis events.
+// Pass nil to unregister and fall back to logging.
+func SetDiagnosisHandler(handler DiagnosisHandler) {
+	diagnosisHandlerMu.Lock()
+	defer diagnosisHandlerMu.Unlock()
+	diagnosisHandler = handler
+}
+
+// EmitDiagnosis sends a diagnosis to the registered handler or logs it.
+func EmitDiagnosis(diagnosis *ErrorDiagnosis) {
+	diagnosisHandlerMu.RLock()
+	handler := diagnosisHandler
+	diagnosisHandlerMu.RUnlock()
+
+	if handler != nil {
+		handler(diagnosis)
+	} else {
+		// Fallback to logging with box format
+		logging.Warn("\n%s", diagnosis.FormatBox())
+	}
+}
+
 // getGlobalDiagnoser returns a shared diagnoser instance for caching.
 func getGlobalDiagnoser() *AIErrorDiagnoser {
 	globalDiagnoserMu.Lock()
@@ -238,12 +269,13 @@ func (d *AIErrorDiagnoser) ClearCache() {
 	d.mu.Unlock()
 }
 
-// DiagnoseSchemaError is a convenience function for diagnosing DDL/schema errors.
-// It uses a shared diagnoser instance for caching across multiple calls.
-func DiagnoseSchemaError(ctx context.Context, tableName, tableSchema, sourceDBType, targetDBType, operation string, err error) string {
+// DiagnoseSchemaError diagnoses a DDL/schema error and emits the diagnosis.
+// Uses a shared diagnoser instance for caching across multiple calls.
+// The diagnosis is emitted via the registered DiagnosisHandler (or logged as fallback).
+func DiagnoseSchemaError(ctx context.Context, tableName, tableSchema, sourceDBType, targetDBType, operation string, err error) {
 	diagnoser := getGlobalDiagnoser()
 	if diagnoser == nil {
-		return ""
+		return
 	}
 
 	errCtx := &ErrorContext{
@@ -257,10 +289,10 @@ func DiagnoseSchemaError(ctx context.Context, tableName, tableSchema, sourceDBTy
 	diagnosis, diagErr := diagnoser.Diagnose(ctx, errCtx)
 	if diagErr != nil {
 		logging.Debug("AI error diagnosis unavailable: %v", diagErr)
-		return ""
+		return
 	}
 
-	return diagnosis.FormatBox()
+	EmitDiagnosis(diagnosis)
 }
 
 // Format returns a plain text representation of the diagnosis.

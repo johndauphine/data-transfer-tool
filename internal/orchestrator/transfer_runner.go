@@ -390,8 +390,8 @@ func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err 
 		return
 	}
 
-	// Log the diagnosis in a formatted box
-	logging.Warn("\n%s", diagnosis.FormatBox())
+	// Emit the diagnosis (TUI will format as box, CLI falls back to logging)
+	driver.EmitDiagnosis(diagnosis)
 }
 
 // collectFailures gathers and deduplicates table failures.

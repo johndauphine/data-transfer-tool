@@ -128,21 +128,37 @@ func TestErrorDiagnosis_FormatBox(t *testing.T) {
 	}
 }
 
-func TestDiagnoseSchemaError_NoAI(t *testing.T) {
-	// Without AI configured, should return empty string
-	ctx := context.Background()
-	result := DiagnoseSchemaError(ctx, "test_table", "public", "postgres", "mssql", "CREATE TABLE", nil)
-
-	// Should return empty when AI is not configured
-	if result != "" {
-		t.Logf("DiagnoseSchemaError returned non-empty without AI configured (may be expected if AI is configured): %s", result)
-	}
-}
-
-func TestDiagnoseSchemaError_NilError(t *testing.T) {
+func TestDiagnoseSchemaError_NoPanic(t *testing.T) {
 	ctx := context.Background()
 	// Calling with nil error should not panic
-	result := DiagnoseSchemaError(ctx, "test_table", "public", "postgres", "mssql", "CREATE TABLE", nil)
-	// Just verify no panic - result may be empty or contain diagnosis
-	_ = result
+	// DiagnoseSchemaError now emits via handler (or logs as fallback)
+	DiagnoseSchemaError(ctx, "test_table", "public", "postgres", "mssql", "CREATE TABLE", nil)
+	// Just verify no panic
+}
+
+func TestSetDiagnosisHandler(t *testing.T) {
+	var received *ErrorDiagnosis
+
+	// Register a handler
+	SetDiagnosisHandler(func(d *ErrorDiagnosis) {
+		received = d
+	})
+	defer SetDiagnosisHandler(nil)
+
+	// Emit a diagnosis
+	diag := &ErrorDiagnosis{
+		Cause:       "Test cause",
+		Suggestions: []string{"Fix it"},
+		Confidence:  "high",
+		Category:    "other",
+	}
+	EmitDiagnosis(diag)
+
+	// Verify handler received it
+	if received == nil {
+		t.Error("Handler should have received diagnosis")
+	}
+	if received.Cause != "Test cause" {
+		t.Errorf("Expected cause 'Test cause', got '%s'", received.Cause)
+	}
 }

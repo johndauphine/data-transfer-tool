@@ -106,19 +106,13 @@ func (s *dropRecreateStrategy) PrepareTables(ctx context.Context, tables []sourc
 				// Indexes and constraints are created separately in Finalize
 			}
 			if err := s.targetPool.CreateTableWithOptions(ctx, &table, s.targetSchema, opts); err != nil {
-				// AI error diagnosis
-				if diag := driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE TABLE", err); diag != "" {
-					logging.Warn("\n%s", diag)
-				}
+				driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE TABLE", err)
 				createErrs <- fmt.Errorf("creating table %s: %w", table.FullName(), err)
 				return
 			}
 			// Create PK immediately after table (PKs are part of table structure)
 			if err := s.targetPool.CreatePrimaryKey(ctx, &table, s.targetSchema); err != nil {
-				// AI error diagnosis
-				if diag := driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE PRIMARY KEY", err); diag != "" {
-					logging.Warn("\n%s", diag)
-				}
+				driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE PRIMARY KEY", err)
 				createErrs <- fmt.Errorf("creating PK for %s: %w", table.FullName(), err)
 			}
 		}(t)
@@ -165,10 +159,7 @@ func (s *dropRecreateStrategy) Finalize(ctx context.Context, tables []source.Tab
 					defer idxWg.Done()
 					if err := s.targetPool.CreateIndex(ctx, &table, &index, s.targetSchema); err != nil {
 						logging.Warn("Warning: creating index %s on %s: %v", index.Name, table.Name, err)
-						// AI error diagnosis
-						if diag := driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE INDEX", err); diag != "" {
-							logging.Warn("\n%s", diag)
-						}
+						driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE INDEX", err)
 					}
 				}(t, idx)
 			}
@@ -194,10 +185,7 @@ func (s *dropRecreateStrategy) Finalize(ctx context.Context, tables []source.Tab
 					defer fkWg.Done()
 					if err := s.targetPool.CreateForeignKey(ctx, &table, &foreignKey, s.targetSchema); err != nil {
 						logging.Warn("Warning: creating FK %s on %s: %v", foreignKey.Name, table.Name, err)
-						// AI error diagnosis
-						if diag := driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE FOREIGN KEY", err); diag != "" {
-							logging.Warn("\n%s", diag)
-						}
+						driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE FOREIGN KEY", err)
 					}
 				}(t, fk)
 			}
@@ -223,10 +211,7 @@ func (s *dropRecreateStrategy) Finalize(ctx context.Context, tables []source.Tab
 					defer chkWg.Done()
 					if err := s.targetPool.CreateCheckConstraint(ctx, &table, &check, s.targetSchema); err != nil {
 						logging.Warn("Warning: creating CHECK %s on %s: %v", check.Name, table.Name, err)
-						// AI error diagnosis
-						if diag := driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE CHECK CONSTRAINT", err); diag != "" {
-							logging.Warn("\n%s", diag)
-						}
+						driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE CHECK CONSTRAINT", err)
 					}
 				}(t, chk)
 			}
