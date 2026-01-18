@@ -1163,9 +1163,17 @@ func (c *Config) DebugDump() string {
 			} else {
 				b.WriteString(fmt.Sprintf("  Model: %s (default)\n", provider.GetEffectiveModel(providerName)))
 			}
-			// AI features status (all enabled by default when provider is configured)
-			b.WriteString("  Type Mapping: enabled\n")
-			b.WriteString("  Error Diagnosis: enabled\n")
+			// AI features status - check each feature separately
+			if typeMapper, err := driver.GetAITypeMapper(); err == nil && typeMapper != nil {
+				b.WriteString("  Type Mapping: enabled\n")
+			} else {
+				b.WriteString("  Type Mapping: disabled\n")
+			}
+			if diagnoser := driver.GetAIErrorDiagnoser(); diagnoser != nil {
+				b.WriteString("  Error Diagnosis: enabled\n")
+			} else {
+				b.WriteString("  Error Diagnosis: disabled\n")
+			}
 			// AI adjust settings from migration_defaults
 			defaults := secretsCfg.GetMigrationDefaults()
 			if defaults.AIAdjust {
