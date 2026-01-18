@@ -97,7 +97,10 @@ func (s *dropRecreateStrategy) PrepareTables(ctx context.Context, tables []sourc
 		createWg.Add(1)
 		go func(table source.Table) {
 			defer createWg.Done()
-			if err := s.targetPool.CreateTable(ctx, &table, s.targetSchema); err != nil {
+			opts := pool.TableOptions{
+				// Indexes and constraints are created separately in Finalize
+			}
+			if err := s.targetPool.CreateTableWithOptions(ctx, &table, s.targetSchema, opts); err != nil {
 				createErrs <- fmt.Errorf("creating table %s: %w", table.FullName(), err)
 				return
 			}

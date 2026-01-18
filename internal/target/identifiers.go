@@ -37,43 +37,36 @@ func qualifyMSSQLTable(schema, table string) string {
 	return mssqlDialect.QualifyTable(schema, table)
 }
 
-// SanitizePGIdentifier converts a SQL Server identifier to a PostgreSQL-friendly format.
-// Rules:
-// 1. Convert to lowercase
-// 2. Replace non-alphanumeric characters with underscores
-// 3. If it starts with a digit, prefix with "col_"
-// 4. If empty (unlikely), fallback to "col_"
+// SanitizePGIdentifier converts an identifier to PostgreSQL-friendly lowercase format.
+// Simply lowercases and replaces special chars with underscores.
+// Example: VoteTypes -> votetypes, UserId -> userid, User-Id -> user_id
 func SanitizePGIdentifier(ident string) string {
 	if ident == "" {
 		return "col_"
 	}
-
-	// 1. Convert to lowercase
 	s := strings.ToLower(ident)
-
-	// 2. Replace non-alphanumeric characters with underscores
-	// We iterate through the string and build a new one
 	var sb strings.Builder
 	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
 			sb.WriteRune(r)
 		} else {
 			sb.WriteRune('_')
 		}
 	}
 	s = sb.String()
-
-	// 3. If it starts with a digit, prefix with "col_"
+	// Prefix with col_ if starts with digit
 	if len(s) > 0 && unicode.IsDigit(rune(s[0])) {
 		s = "col_" + s
 	}
-
-	// Double check for empty string after sanitization
 	if s == "" {
 		return "col_"
 	}
-
 	return s
+}
+
+// SanitizePGTableName is an alias for SanitizePGIdentifier for table names.
+func SanitizePGTableName(ident string) string {
+	return SanitizePGIdentifier(ident)
 }
 
 // IdentifierChange represents a single identifier name change
@@ -112,7 +105,7 @@ func CollectPGIdentifierChanges(tables []TableInfo) *IdentifierChangeReport {
 
 	for _, t := range tables {
 		tableName := t.GetName()
-		sanitizedTableName := SanitizePGIdentifier(tableName)
+		sanitizedTableName := SanitizePGTableName(tableName)
 
 		// Always populate TableName so logging can display the correct table name
 		tableChanges := TableIdentifierChanges{

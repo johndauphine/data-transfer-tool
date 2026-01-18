@@ -70,6 +70,9 @@ type TableOptions struct {
 	// SourceContext contains metadata about the source database.
 	// This is passed to AI type mapper for better DDL generation.
 	SourceContext *DatabaseContext
+
+	// Note: Indexes and CHECK constraints are always created separately in Finalize,
+	// not included in the initial CREATE TABLE DDL.
 }
 
 // WriteBatchOptions configures a bulk write operation.

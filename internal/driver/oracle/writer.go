@@ -283,8 +283,8 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		TargetDBType:  "oracle",
 		SourceTable:   t,
 		TargetSchema:  targetSchema,
-		SourceContext: opts.SourceContext, // Passed from migration coordinator
-		TargetContext: w.dbContext,        // Oracle-specific context
+		SourceContext: opts.SourceContext,
+		TargetContext: w.dbContext,
 	}
 
 	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)

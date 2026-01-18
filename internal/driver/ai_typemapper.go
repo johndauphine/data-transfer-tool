@@ -1255,9 +1255,12 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 		sb.WriteString(fmt.Sprintf("- Use fully qualified table name: %s.<TABLENAME>\n", req.TargetSchema))
 	}
 	sb.WriteString("- Include all columns with appropriate target types\n")
-	sb.WriteString("- Preserve NULL/NOT NULL constraints exactly as in source\n")
+	sb.WriteString("- Make ALL non-primary-key columns nullable (omit NOT NULL) to allow data migration flexibility\n")
+	sb.WriteString("- Primary key columns must be NOT NULL\n")
 	sb.WriteString("- Include PRIMARY KEY constraint\n")
-	sb.WriteString("- Do NOT include indexes, foreign keys, or check constraints\n")
+	sb.WriteString("- Do NOT include foreign keys (created separately in Finalize)\n")
+	sb.WriteString("- Do NOT include indexes (created separately in Finalize)\n")
+	sb.WriteString("- Do NOT include CHECK constraints (created separately in Finalize)\n")
 	sb.WriteString("- Return ONLY the CREATE TABLE statement, no explanation or markdown\n")
 
 	// Database-specific identifier requirements from the target dialect
@@ -1438,8 +1441,9 @@ func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *Databas
 			sb.WriteString("- Use UPPERCASE for all unquoted table and column names\n")
 			sb.WriteString("- Only quote identifiers that are reserved words\n")
 		case "lower":
-			sb.WriteString("- Unquoted identifiers are folded to lowercase\n")
-			sb.WriteString("- Use lowercase for all unquoted table and column names\n")
+			sb.WriteString("- CRITICAL: Unquoted identifiers are folded to lowercase\n")
+			sb.WriteString("- Use lowercase for all table and column names (e.g., UserId -> userid, not user_id)\n")
+			sb.WriteString("- Do NOT convert to snake_case - just lowercase the original name directly\n")
 		case "preserve":
 			sb.WriteString("- Identifier case is preserved as written\n")
 		}

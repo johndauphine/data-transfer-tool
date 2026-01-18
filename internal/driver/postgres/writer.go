@@ -19,8 +19,9 @@ import (
 	"github.com/johndauphine/dmt/internal/stats"
 )
 
-// sanitizePGIdentifier converts an identifier to PostgreSQL-friendly format.
-// Converts to lowercase, replaces special chars with underscores.
+// sanitizePGIdentifier converts an identifier to PostgreSQL-friendly lowercase format.
+// Simply lowercases and replaces special chars with underscores.
+// Example: VoteTypes -> votetypes, UserId -> userid, User-Id -> user_id
 func sanitizePGIdentifier(ident string) string {
 	if ident == "" {
 		return "col_"
@@ -28,13 +29,14 @@ func sanitizePGIdentifier(ident string) string {
 	s := strings.ToLower(ident)
 	var sb strings.Builder
 	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
 			sb.WriteRune(r)
 		} else {
 			sb.WriteRune('_')
 		}
 	}
 	s = sb.String()
+	// Prefix with col_ if starts with digit
 	if len(s) > 0 && unicode.IsDigit(rune(s[0])) {
 		s = "col_" + s
 	}
@@ -42,6 +44,11 @@ func sanitizePGIdentifier(ident string) string {
 		return "col_"
 	}
 	return s
+}
+
+// sanitizePGTableName is an alias for sanitizePGIdentifier for table names.
+func sanitizePGTableName(ident string) string {
+	return sanitizePGIdentifier(ident)
 }
 
 // Writer implements driver.Writer for PostgreSQL.
@@ -300,21 +307,21 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 
 // DropTable drops a table.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
-	sanitizedTable := sanitizePGIdentifier(table)
+	sanitizedTable := sanitizePGTableName(table)
 	_, err := w.pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", w.dialect.QualifyTable(schema, sanitizedTable)))
 	return err
 }
 
 // TruncateTable truncates a table.
 func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error {
-	sanitizedTable := sanitizePGIdentifier(table)
+	sanitizedTable := sanitizePGTableName(table)
 	_, err := w.pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", w.dialect.QualifyTable(schema, sanitizedTable)))
 	return err
 }
 
 // TableExists checks if a table exists.
 func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, error) {
-	sanitizedTable := sanitizePGIdentifier(table)
+	sanitizedTable := sanitizePGTableName(table)
 	var exists bool
 	err := w.pool.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -327,14 +334,42 @@ func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, e
 
 // SetTableLogged converts an UNLOGGED table to LOGGED.
 func (w *Writer) SetTableLogged(ctx context.Context, schema, table string) error {
-	sanitizedTable := sanitizePGIdentifier(table)
+	sanitizedTable := sanitizePGTableName(table)
 	_, err := w.pool.Exec(ctx, fmt.Sprintf("ALTER TABLE %s SET LOGGED", w.dialect.QualifyTable(schema, sanitizedTable)))
 	return err
 }
 
-// CreatePrimaryKey is a no-op because PK is created with the table via AI-generated DDL.
+// CreatePrimaryKey creates the primary key constraint.
+// This is idempotent - it checks if a PK already exists before creating one.
+// AI-generated DDL includes the PK inline, so this check is necessary.
 func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
-	return nil
+	if len(t.PrimaryKey) == 0 {
+		return nil
+	}
+
+	// Check if PK already exists (AI-generated DDL includes PK inline)
+	hasPK, err := w.HasPrimaryKey(ctx, targetSchema, t.Name)
+	if err != nil {
+		return fmt.Errorf("checking for existing PK: %w", err)
+	}
+	if hasPK {
+		return nil // PK already exists, nothing to do
+	}
+
+	sanitizedTable := sanitizePGTableName(t.Name)
+	cols := make([]string, len(t.PrimaryKey))
+	for i, c := range t.PrimaryKey {
+		cols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+	}
+
+	pkName := fmt.Sprintf("pk_%s", sanitizedTable)
+	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY (%s)",
+		w.dialect.QualifyTable(targetSchema, sanitizedTable),
+		w.dialect.QuoteIdentifier(pkName),
+		strings.Join(cols, ", "))
+
+	_, err = w.pool.Exec(ctx, sql)
+	return err
 }
 
 // GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
@@ -556,7 +591,7 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 
 // HasPrimaryKey checks if a table has a primary key.
 func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
-	sanitizedTable := sanitizePGIdentifier(table)
+	sanitizedTable := sanitizePGTableName(table)
 	var exists bool
 	err := w.pool.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -579,7 +614,7 @@ func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, 
 	}
 
 	// Fall back to COUNT(*)
-	sanitizedTable := sanitizePGIdentifier(table)
+	sanitizedTable := sanitizePGTableName(table)
 	err = w.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, sanitizedTable))).Scan(&count)
 	return count, err
 }
@@ -597,7 +632,7 @@ func (w *Writer) GetRowCountFast(ctx context.Context, schema, table string) (int
 // GetRowCountExact returns the exact row count using COUNT(*).
 // This may be slow on large tables.
 func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string) (int64, error) {
-	sanitizedTable := sanitizePGIdentifier(table)
+	sanitizedTable := sanitizePGTableName(table)
 	var count int64
 	err := w.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, sanitizedTable))).Scan(&count)
 	return count, err
@@ -605,7 +640,7 @@ func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string) (in
 
 // ResetSequence resets the sequence for an identity column.
 func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Table) error {
-	sanitizedTable := sanitizePGIdentifier(t.Name)
+	sanitizedTable := sanitizePGTableName(t.Name)
 	for _, col := range t.Columns {
 		if col.IsIdentity {
 			// Find the sequence name (uses sanitized names)
@@ -630,7 +665,7 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	defer conn.Release()
 
 	// Sanitize table and column names to match how they were created (lowercase)
-	sanitizedTable := sanitizePGIdentifier(opts.Table)
+	sanitizedTable := sanitizePGTableName(opts.Table)
 	sanitizedCols := make([]string, len(opts.Columns))
 	for i, col := range opts.Columns {
 		sanitizedCols[i] = sanitizePGIdentifier(col)
