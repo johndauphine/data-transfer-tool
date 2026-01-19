@@ -461,7 +461,7 @@ func runMigration(c *cli.Context) error {
 	// Handle graceful shutdown with timeout
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	setupSignalHandler(c, cancel)
+	setupSignalHandler(c, cancel, orch.Close)
 
 	// Run migration
 	runErr := orch.Run(ctx)
@@ -511,7 +511,7 @@ func resumeMigration(c *cli.Context) error {
 	// Handle graceful shutdown with timeout
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	setupSignalHandler(c, cancel)
+	setupSignalHandler(c, cancel, orch.Close)
 
 	runErr := orch.Resume(ctx)
 
@@ -804,7 +804,11 @@ func outputJSON(c *cli.Context, result *orchestrator.MigrationResult) error {
 // Exit codes:
 //   - 5 (Cancelled): Normal signal-based shutdown, safe to retry
 //   - Timeout or double-signal also exits with 5 (still user-initiated cancellation)
-func setupSignalHandler(c *cli.Context, cancel context.CancelFunc) {
+//
+// The cleanup function is called before forced exit to close database connections
+// and other resources. This ensures we're a good citizen and don't leave orphaned
+// connections in the database.
+func setupSignalHandler(c *cli.Context, cancel context.CancelFunc, cleanup func()) {
 	shutdownTimeout := c.Duration("shutdown-timeout")
 
 	sigCh := make(chan os.Signal, 1)
@@ -823,6 +827,10 @@ func setupSignalHandler(c *cli.Context, cancel context.CancelFunc) {
 		// Start shutdown timer
 		shutdownTimer := time.AfterFunc(shutdownTimeout, func() {
 			fmt.Fprintln(os.Stderr, "Shutdown timeout reached, forcing exit...")
+			fmt.Fprintln(os.Stderr, "Closing database connections...")
+			if cleanup != nil {
+				cleanup()
+			}
 			fmt.Fprintf(os.Stderr, "Exit code %d (%s) - safe to retry\n", exitcodes.Cancelled, exitcodes.Description(exitcodes.Cancelled))
 			os.Exit(exitcodes.Cancelled)
 		})
@@ -831,6 +839,10 @@ func setupSignalHandler(c *cli.Context, cancel context.CancelFunc) {
 		<-sigCh
 		shutdownTimer.Stop()
 		fmt.Fprintln(os.Stderr, "Second signal received, forcing immediate exit...")
+		fmt.Fprintln(os.Stderr, "Closing database connections...")
+		if cleanup != nil {
+			cleanup()
+		}
 		fmt.Fprintf(os.Stderr, "Exit code %d (%s) - safe to retry\n", exitcodes.Cancelled, exitcodes.Description(exitcodes.Cancelled))
 		os.Exit(exitcodes.Cancelled)
 	}()
