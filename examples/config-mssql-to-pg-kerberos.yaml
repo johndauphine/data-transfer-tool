@@ -1,7 +1,5 @@
 # SQL Server to PostgreSQL migration with Kerberos authentication
 #
-# For AI features and Slack notifications, configure ~/.secrets/dmt-config.yaml
-#
 # No passwords required - uses Kerberos tickets
 #
 # Prerequisites:

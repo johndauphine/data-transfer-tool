@@ -441,16 +441,6 @@ func (fs *FileState) GetAIAdjustmentsByAction(action string, limit int) ([]AIAdj
 	return nil, nil
 }
 
-// SaveAITuning is a no-op for file state (doesn't persist tuning history).
-func (fs *FileState) SaveAITuning(record AITuningRecord) error {
-	return nil
-}
-
-// GetAITuningHistory returns empty slice for file state (doesn't persist tuning history).
-func (fs *FileState) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
-	return nil, nil
-}
-
 // Close is a no-op for file state.
 func (fs *FileState) Close() error {
 	return nil

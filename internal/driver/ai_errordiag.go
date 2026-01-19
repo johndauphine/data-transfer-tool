@@ -75,12 +75,6 @@ func EmitDiagnosis(diagnosis *ErrorDiagnosis) {
 	}
 }
 
-// GetAIErrorDiagnoser returns the global AI error diagnoser if available.
-// Returns nil if AI is not configured.
-func GetAIErrorDiagnoser() *AIErrorDiagnoser {
-	return getGlobalDiagnoser()
-}
-
 // getGlobalDiagnoser returns a shared diagnoser instance for caching.
 func getGlobalDiagnoser() *AIErrorDiagnoser {
 	globalDiagnoserMu.Lock()
