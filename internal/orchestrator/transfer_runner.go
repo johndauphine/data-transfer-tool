@@ -221,18 +221,59 @@ func (r *TransferRunner) preTruncateIfNeeded(ctx context.Context, jobs []transfe
 }
 
 // executeJobs runs jobs with a worker pool.
+// For partitioned tables, first partitions are processed before remaining partitions
+// to ensure table setup (truncation) completes before parallel inserts begin.
 func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, aiMonitor *monitor.AIMonitor) ([]TableFailure, error) {
-	logging.Debug("Starting worker pool with %d workers, %d jobs", r.config.Migration.Workers, len(jobs))
+	// Separate first-partitions from remaining-partitions
+	// First partitions handle table setup (truncation), remaining partitions just insert
+	var firstPartitionJobs []transfer.Job
+	var remainingJobs []transfer.Job
 
-	sem := make(chan struct{}, r.config.Migration.Workers)
-	var wg sync.WaitGroup
+	for _, job := range jobs {
+		if job.Partition != nil && job.Partition.IsFirstPartition {
+			firstPartitionJobs = append(firstPartitionJobs, job)
+		} else {
+			remainingJobs = append(remainingJobs, job)
+		}
+	}
+
+	logging.Debug("Starting worker pool with %d workers, %d jobs (%d first-partition, %d remaining)",
+		r.config.Migration.Workers, len(jobs), len(firstPartitionJobs), len(remainingJobs))
 
 	errCh := make(chan tableError, len(jobs))
+
+	// Phase 1: Process first-partition jobs (they handle table setup)
+	// These can run in parallel since they're for different tables
+	if len(firstPartitionJobs) > 0 {
+		if err := r.executeJobBatch(ctx, runID, firstPartitionJobs, buildResult, statsMap, errCh, aiMonitor); err != nil {
+			close(errCh)
+			return nil, err
+		}
+	}
+
+	// Phase 2: Process remaining jobs (after first partitions are done)
+	if len(remainingJobs) > 0 {
+		if err := r.executeJobBatch(ctx, runID, remainingJobs, buildResult, statsMap, errCh, aiMonitor); err != nil {
+			close(errCh)
+			return nil, err
+		}
+	}
+
+	close(errCh)
+
+	// Collect failures
+	return r.collectFailures(errCh)
+}
+
+// executeJobBatch runs a batch of jobs with the worker pool.
+func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor) error {
+	sem := make(chan struct{}, r.config.Migration.Workers)
+	var wg sync.WaitGroup
 
 	for _, job := range jobs {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		case sem <- struct{}{}:
 		}
 
@@ -246,10 +287,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 	}
 
 	wg.Wait()
-	close(errCh)
-
-	// Collect failures
-	return r.collectFailures(errCh)
+	return nil
 }
 
 // executeJob runs a single job with retry logic.
