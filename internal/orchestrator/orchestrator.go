@@ -202,8 +202,18 @@ func New(cfg *config.Config) (*Orchestrator, error) {
 
 // NewWithOptions creates a new orchestrator with custom options.
 func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
+	// Determine max connections based on source/target types
+	maxSourceConns := cfg.Migration.MaxMssqlConnections
+	maxTargetConns := cfg.Migration.MaxPgConnections
+	if cfg.Source.Type == "postgres" {
+		maxSourceConns = cfg.Migration.MaxPgConnections
+	}
+	if cfg.Target.Type == "mssql" {
+		maxTargetConns = cfg.Migration.MaxMssqlConnections
+	}
+
 	// Create source pool using factory
-	sourcePool, err := pool.NewSourcePool(&cfg.Source, cfg.Migration.MaxSourceConnections)
+	sourcePool, err := pool.NewSourcePool(&cfg.Source, maxSourceConns)
 	if err != nil {
 		return nil, fmt.Errorf("creating source pool: %w", err)
 	}
@@ -227,7 +237,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	// Create target pool using factory
 	// Canonicalize source type to handle aliases (e.g., "sqlserver" -> "mssql")
 	sourceType := driver.Canonicalize(cfg.Source.Type)
-	targetPool, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, sourceType, typeMapper)
+	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, sourceType, typeMapper)
 	if err != nil {
 		sourcePool.Close()
 		return nil, fmt.Errorf("creating target pool: %w", err)
@@ -277,8 +287,6 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		cfg.Migration.CreateIndexes,
 		cfg.Migration.CreateForeignKeys,
 		cfg.Migration.CreateCheckConstraints,
-		cfg.Source.Type,
-		cfg.Target.Type,
 	)
 
 	return &Orchestrator{

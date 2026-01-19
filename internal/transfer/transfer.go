@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/godror/godror"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/dmt/internal/config"
@@ -1065,8 +1066,8 @@ func processValue(val any, colType string) any {
 
 	// Handle Oracle NUMBER type - convert to string to preserve precision
 	// This must happen before other type checks since godror.Number can represent any numeric type
-	if converted, handled := processOracleValue(val); handled {
-		return converted
+	if n, ok := val.(godror.Number); ok {
+		return n.String()
 	}
 
 	switch colType {

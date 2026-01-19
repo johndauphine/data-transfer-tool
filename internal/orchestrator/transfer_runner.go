@@ -122,10 +122,15 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 				aiMonitor = monitor.NewAIMonitor(p, aiMapper, interval)
 
 				// Set connection limits from config for AI guardrails
-				aiMonitor.SetConnectionLimits(
-					r.config.Migration.MaxSourceConnections,
-					r.config.Migration.MaxTargetConnections,
-				)
+				maxSource := r.config.Migration.MaxMssqlConnections
+				if r.config.Source.Type == "postgres" {
+					maxSource = r.config.Migration.MaxPgConnections
+				}
+				maxTarget := r.config.Migration.MaxPgConnections
+				if r.config.Target.Type == "mssql" {
+					maxTarget = r.config.Migration.MaxMssqlConnections
+				}
+				aiMonitor.SetConnectionLimits(maxSource, maxTarget)
 
 				// Set state backend for persistent history
 				aiMonitor.SetStateBackend(r.state, runID)
@@ -385,8 +390,14 @@ func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err 
 		return
 	}
 
-	// Emit the diagnosis (TUI will format as box, CLI falls back to logging)
-	driver.EmitDiagnosis(diagnosis)
+	// Log the diagnosis
+	logging.Warn("  AI Diagnosis:")
+	logging.Warn("    Cause: %s", diagnosis.Cause)
+	logging.Warn("    Suggestions:")
+	for _, s := range diagnosis.Suggestions {
+		logging.Warn("      - %s", s)
+	}
+	logging.Warn("    Confidence: %s", diagnosis.Confidence)
 }
 
 // collectFailures gathers and deduplicates table failures.
