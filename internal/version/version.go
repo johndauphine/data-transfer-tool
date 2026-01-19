@@ -1,7 +1,8 @@
 package version
 
 // Version is the current version of dmt.
-const Version = "3.52.1"
+// Can be overridden at build time with -ldflags "-X ...version.Version=..."
+var Version = "3.52.1"
 
 // Name is the application name.
 const Name = "dmt"
