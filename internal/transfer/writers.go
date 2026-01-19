@@ -65,6 +65,15 @@ type writerPoolConfig struct {
 func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 	writerCtx, cancel := context.WithCancel(ctx)
 
+	// Use a larger buffer for jobChan to prevent consumer from blocking.
+	// With parallel readers producing chunks faster than writers can consume,
+	// a small buffer causes the consumer to block on submit(), which blocks
+	// reading from chunkChan, which blocks readers, causing deadlock.
+	jobBufferSize := cfg.BufferSize * cfg.NumWriters * 50
+	if jobBufferSize < 500 {
+		jobBufferSize = 500
+	}
+
 	wp := &writerPool{
 		numWriters:   cfg.NumWriters,
 		bufferSize:   cfg.BufferSize,
@@ -78,13 +87,23 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 		partitionID:  cfg.PartitionID,
 		tgtPool:      cfg.TgtPool,
 		prog:         cfg.Prog,
-		jobChan:      make(chan writeJob, cfg.BufferSize),
+		jobChan:      make(chan writeJob, jobBufferSize),
 		ctx:          writerCtx,
 		cancel:       cancel,
 	}
 
 	if cfg.EnableAck {
-		wp.ackChan = make(chan writeAck, cfg.BufferSize)
+		// Use a much larger buffer for ackChan to prevent writers from blocking.
+		// With parallel readers, writers can produce acks faster than the ack processor
+		// can consume them (especially during checkpoint saves). A small buffer causes
+		// a cascading deadlock: writers block → jobChan fills → consumer blocks →
+		// chunkChan fills → all readers block.
+		// Acks are small (just PK values and sequence numbers), so a large buffer is cheap.
+		ackBufferSize := cfg.BufferSize * cfg.NumWriters * 100
+		if ackBufferSize < 1000 {
+			ackBufferSize = 1000
+		}
+		wp.ackChan = make(chan writeAck, ackBufferSize)
 	}
 
 	return wp
@@ -133,11 +152,24 @@ func (wp *writerPool) worker(writerID int) {
 		wp.prog.Add(rowCount)
 
 		if wp.ackChan != nil {
-			wp.ackChan <- writeAck{
+			// Non-blocking send with context check to prevent deadlock.
+			// If ackChan is full, we skip the ack rather than blocking the writer.
+			// This is safe because checkpoint coordination handles out-of-order and
+			// missing acks gracefully - the checkpoint just won't advance past this point.
+			select {
+			case wp.ackChan <- writeAck{
 				readerID: job.readerID,
 				seq:      job.seq,
 				lastPK:   job.lastPK,
 				rowNum:   job.rowNum,
+			}:
+				// Ack sent successfully
+			case <-wp.ctx.Done():
+				// Context cancelled, exit worker
+				return
+			default:
+				// Channel full, skip this ack (checkpoint won't advance)
+				// This should be rare with the large buffer, but prevents deadlock
 			}
 		}
 	}

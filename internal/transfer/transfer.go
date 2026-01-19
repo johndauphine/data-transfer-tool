@@ -507,18 +507,27 @@ func executeKeysetPagination(
 		}
 	}
 
-	// Create buffered channel for read-ahead pipeline
-	bufferSize := cfg.Migration.ReadAheadBuffers
-	if bufferSize < 0 {
-		bufferSize = 0
-	}
-	chunkChan := make(chan chunkResult, bufferSize)
-
 	// Determine number of parallel readers
 	numReaders := cfg.Migration.ParallelReaders
 	if numReaders < 1 {
 		numReaders = 1
 	}
+
+	// Create buffered channel for read-ahead pipeline
+	// With parallel readers, use a larger buffer to prevent readers from blocking
+	// when the consumer is temporarily slow (e.g., waiting for writers).
+	bufferSize := cfg.Migration.ReadAheadBuffers
+	if bufferSize < 0 {
+		bufferSize = 0
+	}
+	if numReaders > 1 {
+		// Scale buffer with number of readers to prevent deadlock
+		bufferSize = bufferSize * numReaders * 50
+		if bufferSize < 500 {
+			bufferSize = 500
+		}
+	}
+	chunkChan := make(chan chunkResult, bufferSize)
 
 	// Split PK range for parallel readers
 	pkRanges := splitPKRange(minPKVal, maxPKVal, numReaders)
