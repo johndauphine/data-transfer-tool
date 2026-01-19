@@ -630,23 +630,24 @@ func executeKeysetPagination(
 	}
 
 	wp := newWriterPool(ctx, writerPoolConfig{
-		NumWriters:   numWriters,
-		BufferSize:   bufferSize,
-		UseUpsert:    cfg.Migration.TargetMode == "upsert",
-		TargetSchema: cfg.Target.Schema,
-		TargetTable:  targetTableName,
-		TargetCols:   targetCols,
-		ColTypes:     colTypes,
-		ColSRIDs:     colSRIDs,
-		TargetPKCols: buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
-		PartitionID:  partitionID,
-		TgtPool:      tgtPool,
-		Prog:         prog,
-		EnableAck:    job.Saver != nil && job.TaskID > 0,
+		NumWriters:           numWriters,
+		BufferSize:           bufferSize,
+		UseUpsert:            cfg.Migration.TargetMode == "upsert",
+		UpsertMergeChunkSize: cfg.Migration.UpsertMergeChunkSize,
+		TargetSchema:         cfg.Target.Schema,
+		TargetTable:          targetTableName,
+		TargetCols:           targetCols,
+		ColTypes:             colTypes,
+		ColSRIDs:             colSRIDs,
+		TargetPKCols:         buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
+		PartitionID:          partitionID,
+		TgtPool:              tgtPool,
+		Prog:                 prog,
+		EnableAck:            job.Saver != nil && job.TaskID > 0,
 	})
 
 	// Setup checkpoint coordinator
-	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &wp.totalWritten, cfg.Migration.CheckpointFrequency)
+	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, wp.TotalWrittenPtr(), cfg.Migration.CheckpointFrequency)
 	if checkpointCoord != nil {
 		wp.startAckProcessor(checkpointCoord.onAck)
 	}
@@ -666,7 +667,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			wp.cancel()
+			wp.Cancel()
 			break
 		}
 		if result.done {
@@ -906,19 +907,20 @@ func executeRowNumberPagination(
 
 	enableAck := job.Saver != nil && job.TaskID > 0
 	wp := newWriterPool(ctx, writerPoolConfig{
-		NumWriters:   numWriters,
-		BufferSize:   bufferSize,
-		UseUpsert:    cfg.Migration.TargetMode == "upsert",
-		TargetSchema: cfg.Target.Schema,
-		TargetTable:  targetTableName,
-		TargetCols:   targetCols,
-		ColTypes:     colTypes,
-		ColSRIDs:     colSRIDs,
-		TargetPKCols: buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
-		PartitionID:  partitionID,
-		TgtPool:      tgtPool,
-		Prog:         prog,
-		EnableAck:    enableAck,
+		NumWriters:           numWriters,
+		BufferSize:           bufferSize,
+		UseUpsert:            cfg.Migration.TargetMode == "upsert",
+		UpsertMergeChunkSize: cfg.Migration.UpsertMergeChunkSize,
+		TargetSchema:         cfg.Target.Schema,
+		TargetTable:          targetTableName,
+		TargetCols:           targetCols,
+		ColTypes:             colTypes,
+		ColSRIDs:             colSRIDs,
+		TargetPKCols:         buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
+		PartitionID:          partitionID,
+		TgtPool:              tgtPool,
+		Prog:                 prog,
+		EnableAck:            enableAck,
 	})
 
 	// Setup ROW_NUMBER checkpoint handler
@@ -973,7 +975,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			wp.cancel()
+			wp.Cancel()
 			break
 		}
 		if result.done {

@@ -38,6 +38,72 @@ type AIErrorDiagnoser struct {
 	mu       sync.RWMutex
 }
 
+// Package-level singleton for shared caching across DDL operations
+var (
+	globalDiagnoser   *AIErrorDiagnoser
+	globalDiagnoserMu sync.Mutex
+)
+
+// DiagnosisHandler is a callback function for handling diagnosis output.
+// The TUI can register a handler to receive diagnoses and format them as BoxedOutputMsg.
+type DiagnosisHandler func(diagnosis *ErrorDiagnosis)
+
+var (
+	diagnosisHandler   DiagnosisHandler
+	diagnosisHandlerMu sync.RWMutex
+)
+
+// SetDiagnosisHandler registers a callback to receive diagnosis events.
+// Pass nil to unregister and fall back to logging.
+func SetDiagnosisHandler(handler DiagnosisHandler) {
+	diagnosisHandlerMu.Lock()
+	defer diagnosisHandlerMu.Unlock()
+	diagnosisHandler = handler
+}
+
+// EmitDiagnosis sends a diagnosis to the registered handler or logs it.
+func EmitDiagnosis(diagnosis *ErrorDiagnosis) {
+	diagnosisHandlerMu.RLock()
+	handler := diagnosisHandler
+	diagnosisHandlerMu.RUnlock()
+
+	if handler != nil {
+		handler(diagnosis)
+	} else {
+		// Fallback to logging with box format
+		logging.Warn("\n%s", diagnosis.FormatBox())
+	}
+}
+
+// GetAIErrorDiagnoser returns the global AI error diagnoser if available.
+// Returns nil if AI is not configured.
+func GetAIErrorDiagnoser() *AIErrorDiagnoser {
+	return getGlobalDiagnoser()
+}
+
+// getGlobalDiagnoser returns a shared diagnoser instance for caching.
+func getGlobalDiagnoser() *AIErrorDiagnoser {
+	globalDiagnoserMu.Lock()
+	defer globalDiagnoserMu.Unlock()
+
+	if globalDiagnoser != nil {
+		return globalDiagnoser
+	}
+
+	// Try to create a new diagnoser
+	typeMapper, err := GetAITypeMapper()
+	if err != nil {
+		return nil
+	}
+	aiMapper, ok := typeMapper.(*AITypeMapper)
+	if !ok || aiMapper == nil {
+		return nil
+	}
+
+	globalDiagnoser = NewAIErrorDiagnoser(aiMapper)
+	return globalDiagnoser
+}
+
 // NewAIErrorDiagnoser creates a new AI-powered error diagnoser.
 func NewAIErrorDiagnoser(mapper *AITypeMapper) *AIErrorDiagnoser {
 	return &AIErrorDiagnoser{
