@@ -696,7 +696,7 @@ func (m Model) welcomeMessage() string {
   / _' | '_ ' _ \ | __|
  | (_| | | | | | || |_
   \__,_|_| |_| |_| \__|
-  Data Migration Tool v%s
+  Data Migration Tool %s
 `, version.Version)
 
 	welcome := styleTitle.Render(logo)
